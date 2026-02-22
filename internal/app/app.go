@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/andrewstuart/ferry/internal/editor"
 	"github.com/andrewstuart/ferry/internal/fs"
 	ferrySSH "github.com/andrewstuart/ferry/internal/ssh"
 	"github.com/andrewstuart/ferry/internal/transfer"
@@ -17,6 +18,7 @@ import (
 	"github.com/andrewstuart/ferry/internal/ui/picker"
 	"github.com/andrewstuart/ferry/internal/ui/statusbar"
 	"github.com/andrewstuart/ferry/internal/ui/theme"
+	transferUI "github.com/andrewstuart/ferry/internal/ui/transfer"
 )
 
 // appState represents the current UI state.
@@ -80,6 +82,12 @@ type Model struct {
 	inputMode  string // "", "rename", "mkdir", "confirm-delete"
 	inputField textinput.Model
 
+	// Editor
+	editSession *editor.EditSession
+
+	// Transfer overlay
+	overlay *transferUI.Overlay
+
 	// Error
 	err error
 }
@@ -100,6 +108,7 @@ func New() Model {
 		picker:     picker.New(hosts),
 		spinner:    sp,
 		inputField: ti,
+		overlay:    transferUI.NewOverlay(),
 	}
 }
 
@@ -141,6 +150,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		evt := transfer.ProgressEvent(msg)
 		if evt.Done && evt.Err != nil {
 			m.statusBar.SetError(fmt.Sprintf("Transfer failed: %s: %v", evt.Name, evt.Err))
+		}
+		// Update overlay with progress and job list.
+		m.overlay.UpdateProgress(evt)
+		if m.engine != nil {
+			m.overlay.SetJobs(m.engine.Jobs())
+			// Auto-show overlay when transfers start.
+			if !m.overlay.IsVisible() && m.engine.ActiveCount() > 0 {
+				m.overlay.SetVisible(true)
+			}
 		}
 		// Check if all transfers are done.
 		if m.engine != nil && m.engine.ActiveCount() == 0 {
@@ -261,12 +279,30 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateInputMode(msg)
 	}
 
+	// Handle overlay-specific keys when visible.
+	if m.overlay.IsVisible() {
+		if msg, ok := msg.(tea.KeyMsg); ok {
+			switch msg.String() {
+			case "esc":
+				m.overlay.SetVisible(false)
+				return m, nil
+			case "t":
+				m.overlay.Toggle()
+				return m, nil
+			}
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		key := msg.String()
 		defer func() { m.lastKey = key }()
 
 		switch key {
+		case "t":
+			m.overlay.Toggle()
+			return m, nil
+
 		case "tab":
 			m.activePane = 1 - m.activePane
 			m.localPane.SetActive(m.activePane == 0)
@@ -559,7 +595,14 @@ func (m Model) viewBrowser() string {
 		bar = m.statusBar.View()
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, panes, bar)
+	base := lipgloss.JoinVertical(lipgloss.Left, panes, bar)
+
+	// Render overlay on top if visible.
+	if m.overlay.IsVisible() {
+		return m.overlay.View()
+	}
+
+	return base
 }
 
 // --- Helpers ---
@@ -583,6 +626,7 @@ func (m *Model) setPaneSizes() {
 	m.localPane.SetSize(paneWidth, paneHeight)
 	m.remotePane.SetSize(m.width-paneWidth, paneHeight)
 	m.statusBar.SetWidth(m.width)
+	m.overlay.SetSize(m.width, m.height)
 }
 
 func (m *Model) updateStatusSelection() {
