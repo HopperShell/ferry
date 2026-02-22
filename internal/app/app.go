@@ -3,13 +3,16 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/andrewstuart/ferry/internal/fs"
 	ferrySSH "github.com/andrewstuart/ferry/internal/ssh"
+	"github.com/andrewstuart/ferry/internal/transfer"
 	"github.com/andrewstuart/ferry/internal/ui/pane"
 	"github.com/andrewstuart/ferry/internal/ui/picker"
 	"github.com/andrewstuart/ferry/internal/ui/statusbar"
@@ -34,10 +37,24 @@ type connectErrorMsg struct {
 	err error
 }
 
+// progressMsg wraps a transfer progress event as a Bubble Tea message.
+type progressMsg transfer.ProgressEvent
+
+// transferDoneMsg signals that all transfers have completed.
+type transferDoneMsg struct{}
+
+// clipboard stores yanked/cut entries for paste operations.
+type clipboard struct {
+	entries []fs.Entry
+	srcFS   fs.FileSystem
+	srcPath string
+	cut     bool // true for move (m), false for copy (yy)
+}
+
 // Model is the top-level Bubble Tea model for ferry.
 type Model struct {
-	state appState
-	width int
+	state  appState
+	width  int
 	height int
 
 	// Picker
@@ -55,6 +72,13 @@ type Model struct {
 	remotePane pane.Model
 	activePane int // 0 = left (local), 1 = right (remote)
 	statusBar  statusbar.StatusBar
+	lastKey    string // for yy/dd detection at app level
+
+	// File operations
+	clip       *clipboard
+	engine     *transfer.Engine
+	inputMode  string // "", "rename", "mkdir", "confirm-delete"
+	inputField textinput.Model
 
 	// Error
 	err error
@@ -68,10 +92,14 @@ func New() Model {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(theme.Cyan)
 
+	ti := textinput.New()
+	ti.CharLimit = 256
+
 	return Model{
-		state:   statePicker,
-		picker:  picker.New(hosts),
-		spinner: sp,
+		state:      statePicker,
+		picker:     picker.New(hosts),
+		spinner:    sp,
+		inputField: ti,
 	}
 }
 
@@ -90,18 +118,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global quit keys.
 		switch msg.String() {
 		case "ctrl+c":
+			if m.engine != nil {
+				m.engine.Cancel()
+			}
 			if m.conn != nil {
 				m.conn.Close()
 			}
 			return m, tea.Quit
 		case "q":
-			if m.state == stateBrowser {
+			if m.state == stateBrowser && m.inputMode == "" {
+				if m.engine != nil {
+					m.engine.Cancel()
+				}
 				if m.conn != nil {
 					m.conn.Close()
 				}
 				return m, tea.Quit
 			}
 		}
+
+	case progressMsg:
+		evt := transfer.ProgressEvent(msg)
+		if evt.Done && evt.Err != nil {
+			m.statusBar.SetError(fmt.Sprintf("Transfer failed: %s: %v", evt.Name, evt.Err))
+		}
+		// Check if all transfers are done.
+		if m.engine != nil && m.engine.ActiveCount() == 0 {
+			// If this was a move (cut), delete sources.
+			if m.clip != nil && m.clip.cut {
+				for _, entry := range m.clip.entries {
+					_ = m.clip.srcFS.Remove(entry.Path)
+				}
+				m.clip = nil
+			}
+			return m, tea.Batch(
+				m.localPane.Refresh(),
+				m.remotePane.Refresh(),
+				listenForProgress(m.engine.Progress()),
+			)
+		}
+		return m, listenForProgress(m.engine.Progress())
 	}
 
 	switch m.state {
@@ -200,15 +256,55 @@ func (m Model) viewConnecting() string {
 // --- State: Browser ---
 
 func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle input modes first (rename, mkdir, confirm-delete).
+	if m.inputMode != "" {
+		return m.updateInputMode(msg)
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
+		key := msg.String()
+		defer func() { m.lastKey = key }()
+
+		switch key {
 		case "tab":
 			m.activePane = 1 - m.activePane
 			m.localPane.SetActive(m.activePane == 0)
 			m.remotePane.SetActive(m.activePane == 1)
 			m.updateStatusSelection()
 			return m, nil
+
+		case "y":
+			if m.lastKey == "y" {
+				// yy: yank/copy
+				m.lastKey = ""
+				return m.doYank(false)
+			}
+			return m, nil
+
+		case "p":
+			// paste
+			return m.doPaste()
+
+		case "d":
+			if m.lastKey == "d" {
+				// dd: delete with confirmation
+				m.lastKey = ""
+				return m.startDelete()
+			}
+			return m, nil
+
+		case "r":
+			// rename
+			return m.startRename()
+
+		case "m":
+			// move: yank as cut, then paste
+			return m.doYank(true)
+
+		case "D":
+			// mkdir
+			return m.startMkdir()
 		}
 	}
 
@@ -223,12 +319,245 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc":
+			m.inputMode = ""
+			m.inputField.Blur()
+			return m, nil
+
+		case "enter":
+			return m.submitInput()
+
+		case "n":
+			if m.inputMode == "confirm-delete" {
+				m.inputMode = ""
+				m.inputField.Blur()
+				return m, nil
+			}
+			// Fall through for other input modes.
+		}
+
+		if m.inputMode == "confirm-delete" {
+			if msg.String() == "y" {
+				return m.executeDelete()
+			}
+			return m, nil
+		}
+	}
+
+	// Update the text input for rename/mkdir.
+	var cmd tea.Cmd
+	m.inputField, cmd = m.inputField.Update(msg)
+	return m, cmd
+}
+
+func (m Model) submitInput() (tea.Model, tea.Cmd) {
+	value := m.inputField.Value()
+	mode := m.inputMode
+	m.inputMode = ""
+	m.inputField.Blur()
+
+	_, activeFS, activePath := m.activePaneInfo()
+
+	switch mode {
+	case "rename":
+		var entry *fs.Entry
+		if m.activePane == 0 {
+			entry = m.localPane.CurrentEntry()
+		} else {
+			entry = m.remotePane.CurrentEntry()
+		}
+		if entry != nil && value != "" && value != entry.Name {
+			newPath := filepath.Join(filepath.Dir(entry.Path), value)
+			if err := activeFS.Rename(entry.Path, newPath); err != nil {
+				m.statusBar.SetError(fmt.Sprintf("Rename error: %v", err))
+			} else {
+				m.statusBar.SetError("")
+			}
+		}
+
+	case "mkdir":
+		if value != "" {
+			dirPath := filepath.Join(activePath, value)
+			if err := activeFS.Mkdir(dirPath, 0o755); err != nil {
+				m.statusBar.SetError(fmt.Sprintf("Mkdir error: %v", err))
+			} else {
+				m.statusBar.SetError("")
+			}
+		}
+	}
+
+	// Refresh the active pane.
+	if m.activePane == 0 {
+		return m, m.localPane.Refresh()
+	}
+	return m, m.remotePane.Refresh()
+}
+
+// doYank stores selected entries in the clipboard.
+func (m Model) doYank(cut bool) (tea.Model, tea.Cmd) {
+	var entries []fs.Entry
+	var srcFS fs.FileSystem
+	var srcPath string
+
+	if m.activePane == 0 {
+		entries = m.localPane.SelectedEntries()
+		srcFS = m.localPane.FS()
+		srcPath = m.localPane.Path()
+	} else {
+		entries = m.remotePane.SelectedEntries()
+		srcFS = m.remotePane.FS()
+		srcPath = m.remotePane.Path()
+	}
+
+	if len(entries) == 0 {
+		return m, nil
+	}
+
+	m.clip = &clipboard{
+		entries: entries,
+		srcFS:   srcFS,
+		srcPath: srcPath,
+		cut:     cut,
+	}
+
+	action := "Yanked"
+	if cut {
+		action = "Cut"
+	}
+	m.statusBar.SetError(fmt.Sprintf("%s %d item(s)", action, len(entries)))
+
+	return m, nil
+}
+
+// doPaste creates transfer jobs from clipboard to the current pane's directory.
+func (m Model) doPaste() (tea.Model, tea.Cmd) {
+	if m.clip == nil || len(m.clip.entries) == 0 {
+		m.statusBar.SetError("Nothing to paste")
+		return m, nil
+	}
+
+	var dstFS fs.FileSystem
+	var dstPath string
+	if m.activePane == 0 {
+		dstFS = m.localPane.FS()
+		dstPath = m.localPane.Path()
+	} else {
+		dstFS = m.remotePane.FS()
+		dstPath = m.remotePane.Path()
+	}
+
+	m.engine = transfer.NewEngine(2)
+
+	for _, entry := range m.clip.entries {
+		m.engine.EnqueueEntry(entry, m.clip.srcFS, m.clip.srcPath, dstFS, dstPath)
+	}
+
+	// Start engine in background.
+	go m.engine.Start()
+
+	m.statusBar.SetError(fmt.Sprintf("Transferring %d item(s)...", len(m.clip.entries)))
+
+	return m, listenForProgress(m.engine.Progress())
+}
+
+// startDelete prompts for confirmation.
+func (m Model) startDelete() (tea.Model, tea.Cmd) {
+	var entries []fs.Entry
+	if m.activePane == 0 {
+		entries = m.localPane.SelectedEntries()
+	} else {
+		entries = m.remotePane.SelectedEntries()
+	}
+	if len(entries) == 0 {
+		return m, nil
+	}
+
+	m.inputMode = "confirm-delete"
+	m.statusBar.SetError(fmt.Sprintf("Delete %d item(s)? y/n", len(entries)))
+	return m, nil
+}
+
+// executeDelete performs the actual deletion.
+func (m Model) executeDelete() (tea.Model, tea.Cmd) {
+	m.inputMode = ""
+
+	var entries []fs.Entry
+	var activeFS fs.FileSystem
+	if m.activePane == 0 {
+		entries = m.localPane.SelectedEntries()
+		activeFS = m.localPane.FS()
+	} else {
+		entries = m.remotePane.SelectedEntries()
+		activeFS = m.remotePane.FS()
+	}
+
+	var lastErr error
+	for _, entry := range entries {
+		if err := activeFS.Remove(entry.Path); err != nil {
+			lastErr = err
+		}
+	}
+
+	if lastErr != nil {
+		m.statusBar.SetError(fmt.Sprintf("Delete error: %v", lastErr))
+	} else {
+		m.statusBar.SetError("")
+	}
+
+	// Refresh the active pane.
+	if m.activePane == 0 {
+		return m, m.localPane.Refresh()
+	}
+	return m, m.remotePane.Refresh()
+}
+
+// startRename enters rename input mode.
+func (m Model) startRename() (tea.Model, tea.Cmd) {
+	var entry *fs.Entry
+	if m.activePane == 0 {
+		entry = m.localPane.CurrentEntry()
+	} else {
+		entry = m.remotePane.CurrentEntry()
+	}
+	if entry == nil {
+		return m, nil
+	}
+
+	m.inputMode = "rename"
+	m.inputField.SetValue(entry.Name)
+	m.inputField.Focus()
+	m.inputField.Prompt = "Rename: "
+	m.inputField.CursorEnd()
+
+	return m, textinput.Blink
+}
+
+// startMkdir enters mkdir input mode.
+func (m Model) startMkdir() (tea.Model, tea.Cmd) {
+	m.inputMode = "mkdir"
+	m.inputField.SetValue("")
+	m.inputField.Focus()
+	m.inputField.Prompt = "New dir: "
+
+	return m, textinput.Blink
+}
+
 func (m Model) viewBrowser() string {
 	leftView := m.localPane.View()
 	rightView := m.remotePane.View()
 
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, leftView, rightView)
-	bar := m.statusBar.View()
+
+	var bar string
+	if m.inputMode == "rename" || m.inputMode == "mkdir" {
+		bar = m.inputField.View()
+	} else {
+		bar = m.statusBar.View()
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, panes, bar)
 }
@@ -270,6 +599,14 @@ func (m *Model) updateStatusSelection() {
 	m.statusBar.SetSelection(count)
 }
 
+// activePaneInfo returns the active pane, its FS, and current path.
+func (m Model) activePaneInfo() (*pane.Model, fs.FileSystem, string) {
+	if m.activePane == 0 {
+		return &m.localPane, m.localPane.FS(), m.localPane.Path()
+	}
+	return &m.remotePane, m.remotePane.FS(), m.remotePane.Path()
+}
+
 func (m Model) doConnect(host string) tea.Cmd {
 	return func() tea.Msg {
 		conn, err := ferrySSH.Connect(ferrySSH.ConnectOptions{
@@ -279,5 +616,16 @@ func (m Model) doConnect(host string) tea.Cmd {
 			return connectErrorMsg{err: err}
 		}
 		return connectSuccessMsg{conn: conn}
+	}
+}
+
+// listenForProgress returns a Cmd that reads the next progress event from the channel.
+func listenForProgress(ch <-chan transfer.ProgressEvent) tea.Cmd {
+	return func() tea.Msg {
+		event, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return progressMsg(event)
 	}
 }

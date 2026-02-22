@@ -106,6 +106,11 @@ func (m Model) Path() string {
 	return m.path
 }
 
+// FS returns the filesystem backing this pane.
+func (m Model) FS() fs.FileSystem {
+	return m.fs
+}
+
 // Refresh re-lists the current directory.
 func (m Model) Refresh() tea.Cmd {
 	return m.listDir(m.path)
