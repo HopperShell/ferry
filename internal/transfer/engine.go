@@ -5,11 +5,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/andrewstuart/ferry/internal/fs"
 )
+
+const tempSuffix = ".ferry-tmp"
 
 // JobStatus represents the state of a transfer job.
 type JobStatus int
@@ -47,17 +51,21 @@ type ProgressEvent struct {
 
 // Engine manages a queue of file transfer jobs with concurrent execution.
 type Engine struct {
-	jobs       []*Job
-	progress   chan ProgressEvent
-	maxWorkers int
-	mu         sync.Mutex
-	ctx        context.Context
-	cancel     context.CancelFunc
-	nextID     int
+	jobs        []*Job
+	progress    chan ProgressEvent
+	maxWorkers  int
+	resumable   bool
+	mu          sync.Mutex
+	ctx         context.Context
+	cancel      context.CancelFunc
+	nextID      int
+	enqueueDone bool // set by Done() to signal no more jobs coming
 }
 
 // NewEngine creates a new transfer engine with the given concurrency.
-func NewEngine(maxWorkers int) *Engine {
+// When resumable is true, completed files (same size+mtime) are skipped
+// and writes use a temp file with atomic rename.
+func NewEngine(maxWorkers int, resumable bool) *Engine {
 	if maxWorkers < 1 {
 		maxWorkers = 1
 	}
@@ -65,13 +73,13 @@ func NewEngine(maxWorkers int) *Engine {
 	return &Engine{
 		progress:   make(chan ProgressEvent, 64),
 		maxWorkers: maxWorkers,
+		resumable:  resumable,
 		ctx:        ctx,
 		cancel:     cancel,
 	}
 }
 
-// Enqueue adds a job to the queue. If the entry is a directory, it walks it
-// recursively and enqueues individual file jobs.
+// Enqueue adds a job to the queue.
 func (e *Engine) Enqueue(job *Job) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -80,39 +88,79 @@ func (e *Engine) Enqueue(job *Job) {
 	e.jobs = append(e.jobs, job)
 }
 
-// EnqueueEntry enqueues a transfer for a single fs.Entry. If the entry is a
-// directory, it walks it and enqueues each file individually.
+// EnqueueMkdir creates a destination directory and records it as an
+// immediately-completed job so it appears in the transfer overlay.
+func (e *Engine) EnqueueMkdir(name string, dstPath string, dstFS fs.FileSystem) {
+	_ = dstFS.Mkdir(dstPath, 0o755)
+	e.mu.Lock()
+	e.nextID++
+	job := &Job{
+		ID:      fmt.Sprintf("job-%d", e.nextID),
+		Name:    name + "/",
+		DstPath: dstPath,
+		DstFS:   dstFS,
+		Status:  JobCompleted,
+	}
+	e.jobs = append(e.jobs, job)
+	evt := ProgressEvent{
+		JobID: job.ID,
+		Name:  job.Name,
+		Done:  true,
+	}
+	e.mu.Unlock()
+	// Send progress AFTER releasing the lock to avoid deadlock with Start().
+	e.progress <- evt
+}
+
+// EnqueueEntry enqueues a transfer for a single fs.Entry. srcBase is the
+// directory that contains the entry; the entry's relative path from srcBase
+// is preserved on the destination side under dstBase.
+// If the entry is a directory, it walks it and enqueues each file individually.
 func (e *Engine) EnqueueEntry(entry fs.Entry, srcFS fs.FileSystem, srcBase string, dstFS fs.FileSystem, dstBase string) {
+	// Compute the relative path from srcBase to preserve directory structure.
+	relPath, err := filepath.Rel(srcBase, entry.Path)
+	if err != nil || relPath == "." {
+		relPath = entry.Name
+	}
+
 	if !entry.IsDir {
 		e.Enqueue(&Job{
-			Name:    entry.Name,
+			Name:    relPath,
 			SrcPath: entry.Path,
 			SrcFS:   srcFS,
-			DstPath: filepath.Join(dstBase, entry.Name),
+			DstPath: filepath.Join(dstBase, relPath),
 			DstFS:   dstFS,
 			Size:    entry.Size,
 		})
 		return
 	}
-	// Walk directory recursively.
-	e.walkAndEnqueue(srcFS, entry.Path, dstFS, dstBase, entry.Name)
+
+	// If the destination already ends with the same directory name,
+	// merge into it instead of creating a nested subdirectory.
+	// e.g. copying "Test/" into "/root/Test" → merge into "/root/Test",
+	// not "/root/Test/Test".
+	dstDir := filepath.Join(dstBase, relPath)
+	if filepath.Base(dstBase) == entry.Name {
+		dstDir = dstBase
+	}
+	e.walkAndEnqueue(srcFS, entry.Path, dstFS, dstDir, relPath)
 }
 
-func (e *Engine) walkAndEnqueue(srcFS fs.FileSystem, srcDir string, dstFS fs.FileSystem, dstBase string, dirName string) {
-	dstDir := filepath.Join(dstBase, dirName)
-	// Create destination directory.
-	_ = dstFS.Mkdir(dstDir, 0o755)
+func (e *Engine) walkAndEnqueue(srcFS fs.FileSystem, srcDir string, dstFS fs.FileSystem, dstDir string, displayPrefix string) {
+	// Create destination directory and track it.
+	e.EnqueueMkdir(displayPrefix, dstDir, dstFS)
 
 	entries, err := srcFS.List(srcDir)
 	if err != nil {
 		return
 	}
 	for _, entry := range entries {
+		childDisplay := filepath.Join(displayPrefix, entry.Name)
 		if entry.IsDir {
-			e.walkAndEnqueue(srcFS, entry.Path, dstFS, dstDir, entry.Name)
+			e.walkAndEnqueue(srcFS, entry.Path, dstFS, filepath.Join(dstDir, entry.Name), childDisplay)
 		} else {
 			e.Enqueue(&Job{
-				Name:    entry.Name,
+				Name:    childDisplay,
 				SrcPath: entry.Path,
 				SrcFS:   srcFS,
 				DstPath: filepath.Join(dstDir, entry.Name),
@@ -124,31 +172,62 @@ func (e *Engine) walkAndEnqueue(srcFS fs.FileSystem, srcDir string, dstFS fs.Fil
 }
 
 // Start begins processing enqueued jobs with up to maxWorkers concurrency.
+// It processes all pending jobs and then waits for any that were added
+// while running (via EnqueueEntry from another goroutine). Call Done()
+// to signal that no more jobs will be added.
 func (e *Engine) Start() {
-	e.mu.Lock()
-	pending := e.pendingJobs()
-	e.mu.Unlock()
+	defer close(e.progress)
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, e.maxWorkers)
 
-	for _, job := range pending {
-		select {
-		case <-e.ctx.Done():
-			return
-		default:
+	for {
+		e.mu.Lock()
+		pending := e.pendingJobs()
+		done := e.enqueueDone
+		e.mu.Unlock()
+
+		if len(pending) == 0 {
+			if done {
+				break
+			}
+			// Wait briefly for more jobs to arrive.
+			select {
+			case <-e.ctx.Done():
+				wg.Wait()
+				return
+			case <-time.After(50 * time.Millisecond):
+				continue
+			}
 		}
 
-		sem <- struct{}{}
-		wg.Add(1)
-		go func(j *Job) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			e.runJob(j)
-		}(job)
+		for _, job := range pending {
+			select {
+			case <-e.ctx.Done():
+				wg.Wait()
+				return
+			default:
+			}
+
+			sem <- struct{}{}
+			wg.Add(1)
+			go func(j *Job) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				e.runJob(j)
+			}(job)
+		}
 	}
 
 	wg.Wait()
+}
+
+// Done signals that no more jobs will be enqueued. Start() will finish
+// once all pending jobs are processed.
+func (e *Engine) Done() {
+	e.mu.Lock()
+	e.enqueueDone = true
+	e.mu.Unlock()
 }
 
 // Cancel cancels all active transfers.
@@ -183,6 +262,21 @@ func (e *Engine) ActiveCount() int {
 	return count
 }
 
+// IsFinished returns true when Done() has been called and no jobs are pending or active.
+func (e *Engine) IsFinished() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.enqueueDone {
+		return false
+	}
+	for _, j := range e.jobs {
+		if j.Status == JobPending || j.Status == JobActive {
+			return false
+		}
+	}
+	return true
+}
+
 // Clear removes completed and failed jobs from the list.
 func (e *Engine) Clear() {
 	e.mu.Lock()
@@ -211,10 +305,36 @@ func (e *Engine) runJob(j *Job) {
 	j.Status = JobActive
 	e.mu.Unlock()
 
-	// Stat source for size if not already set.
-	if j.Size == 0 {
+	// Stat source for size and metadata.
+	var srcStat fs.Entry
+	if stat, err := j.SrcFS.Stat(j.SrcPath); err == nil {
+		srcStat = stat
+		if j.Size == 0 {
+			j.Size = stat.Size
+		}
+	} else if j.Size == 0 {
 		if stat, err := j.SrcFS.Stat(j.SrcPath); err == nil {
 			j.Size = stat.Size
+		}
+	}
+
+	// Skip completed files when resumable: same size and mtime (2s tolerance).
+	if e.resumable {
+		if dstStat, err := j.DstFS.Stat(j.DstPath); err == nil {
+			if dstStat.Size == srcStat.Size && !srcStat.ModTime.IsZero() &&
+				math.Abs(dstStat.ModTime.Sub(srcStat.ModTime).Seconds()) < 2 {
+				e.mu.Lock()
+				j.Status = JobCompleted
+				e.mu.Unlock()
+				e.progress <- ProgressEvent{
+					JobID:      j.ID,
+					Name:       j.Name,
+					BytesSent:  j.Size,
+					TotalBytes: j.Size,
+					Done:       true,
+				}
+				return
+			}
 		}
 	}
 
@@ -238,18 +358,27 @@ func (e *Engine) runJob(j *Job) {
 		return
 	}
 
-	// Now write from progress reader to destination.
-	perm := fs.Entry{}.Mode
+	// Ensure destination directory exists.
+	dstDir := filepath.Dir(j.DstPath)
+	_ = j.DstFS.Mkdir(dstDir, 0o755)
+
+	// Determine permissions.
+	perm := srcStat.Mode
 	if perm == 0 {
 		perm = 0o644
 	}
-	// Stat for permissions.
-	if stat, err := j.SrcFS.Stat(j.SrcPath); err == nil {
-		perm = stat.Mode
+
+	// Choose write path: use temp file for resumable transfers.
+	writePath := j.DstPath
+	if e.resumable {
+		writePath = j.DstPath + tempSuffix
 	}
 
-	err = j.DstFS.Write(j.DstPath, pr, perm)
+	err = j.DstFS.Write(writePath, pr, perm)
 	if err != nil {
+		if e.resumable {
+			_ = j.DstFS.Remove(writePath) // clean up temp file
+		}
 		e.mu.Lock()
 		j.Status = JobFailed
 		j.Err = fmt.Errorf("write dest: %w", err)
@@ -261,6 +390,29 @@ func (e *Engine) runJob(j *Job) {
 			Err:   j.Err,
 		}
 		return
+	}
+
+	// Atomic rename for resumable transfers.
+	if e.resumable {
+		if err := j.DstFS.Rename(writePath, j.DstPath); err != nil {
+			_ = j.DstFS.Remove(writePath)
+			e.mu.Lock()
+			j.Status = JobFailed
+			j.Err = fmt.Errorf("rename temp: %w", err)
+			e.mu.Unlock()
+			e.progress <- ProgressEvent{
+				JobID: j.ID,
+				Name:  j.Name,
+				Done:  true,
+				Err:   j.Err,
+			}
+			return
+		}
+	}
+
+	// Preserve source modification time on the destination.
+	if !srcStat.ModTime.IsZero() {
+		_ = j.DstFS.Chtimes(j.DstPath, srcStat.ModTime)
 	}
 
 	// Emit final progress event.

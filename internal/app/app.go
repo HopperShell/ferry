@@ -2,8 +2,11 @@
 package app
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -23,7 +26,6 @@ import (
 	"github.com/andrewstuart/ferry/internal/ui/picker"
 	"github.com/andrewstuart/ferry/internal/ui/statusbar"
 	"github.com/andrewstuart/ferry/internal/ui/theme"
-	transferUI "github.com/andrewstuart/ferry/internal/ui/transfer"
 )
 
 // appState represents the current UI state.
@@ -32,6 +34,7 @@ type appState int
 const (
 	statePicker     appState = iota // show connection picker
 	stateConnecting                 // show spinner while connecting
+	statePassword                   // prompt for password
 	stateBrowser                    // dual-pane file browser
 	stateSync                       // sync/diff view
 )
@@ -43,6 +46,11 @@ type connectSuccessMsg struct {
 
 type connectErrorMsg struct {
 	err error
+}
+
+// transferReadyMsg signals that an async transfer walk/enqueue has completed.
+type transferReadyMsg struct {
+	engine *transfer.Engine
 }
 
 // progressMsg wraps a transfer progress event as a Bubble Tea message.
@@ -82,7 +90,8 @@ type Model struct {
 	spinner     spinner.Model
 
 	// Connection
-	conn *ferrySSH.Connection
+	conn          *ferrySSH.Connection
+	passwordInput textinput.Model
 
 	// Browser
 	localPane  pane.Model
@@ -100,15 +109,15 @@ type Model struct {
 	// Editor
 	editSession *editor.EditSession
 
-	// Transfer overlay
-	overlay *transferUI.Overlay
-
 	// Info panel and help overlay
 	infoPanel   *modal.InfoPanel
 	helpOverlay *modal.HelpOverlay
 
 	// Sync/diff view
-	diffView diff.Model
+	diffView       diff.Model
+	syncLocalRoot  string // local root used for the active sync comparison
+	syncRemoteRoot string // remote root used for the active sync comparison
+	syncProgress   chan diff.SyncProgressMsg // progress updates from sync goroutine
 
 	// Error
 	err error
@@ -136,12 +145,18 @@ func NewWithOptions(opts Options) Model {
 	ti := textinput.New()
 	ti.CharLimit = 256
 
+	pw := textinput.New()
+	pw.CharLimit = 256
+	pw.EchoMode = textinput.EchoPassword
+	pw.EchoCharacter = '•'
+	pw.Placeholder = "password"
+
 	m := Model{
-		state:       statePicker,
-		picker:      picker.New(hosts),
-		spinner:     sp,
-		inputField:  ti,
-		overlay:     transferUI.NewOverlay(),
+		state:         statePicker,
+		picker:        picker.New(hosts),
+		spinner:       sp,
+		inputField:    ti,
+		passwordInput: pw,
 		infoPanel:   modal.NewInfoPanel(),
 		helpOverlay: modal.NewHelpOverlay(),
 		diffView:    diff.New(),
@@ -200,40 +215,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.statusBar.SetError(fmt.Sprintf("Transfer failed: %s: %v", evt.Name, evt.Err))
 			}
+		} else if evt.Done {
+			m.statusBar.SetError(fmt.Sprintf("Transferred: %s", evt.Name))
 		}
-		// Update overlay with progress and job list.
-		m.overlay.UpdateProgress(evt)
-		if m.engine != nil {
-			m.overlay.SetJobs(m.engine.Jobs())
-			// Auto-show overlay when transfers start.
-			if !m.overlay.IsVisible() && m.engine.ActiveCount() > 0 {
-				m.overlay.SetVisible(true)
+		// If this was a move (cut) and all done, delete sources.
+		if m.engine != nil && m.engine.IsFinished() && m.clip != nil && m.clip.cut {
+			for _, entry := range m.clip.entries {
+				_ = m.clip.srcFS.Remove(entry.Path)
 			}
+			m.clip = nil
 		}
-		// Check if all transfers are done.
-		if m.engine != nil && m.engine.ActiveCount() == 0 {
-			// If this was a move (cut), delete sources.
-			if m.clip != nil && m.clip.cut {
-				for _, entry := range m.clip.entries {
-					_ = m.clip.srcFS.Remove(entry.Path)
-				}
-				m.clip = nil
-			}
-			// If we were in sync state, return to browser.
-			if m.state == stateSync {
-				m.state = stateBrowser
-				return m, tea.Batch(
-					m.localPane.Refresh(),
-					m.remotePane.Refresh(),
-					listenForProgress(m.engine.Progress()),
-				)
-			}
-			return m, tea.Batch(
-				m.localPane.Refresh(),
-				m.remotePane.Refresh(),
-				listenForProgress(m.engine.Progress()),
-			)
-		}
+		// Keep listening; transferDoneMsg will handle final cleanup when channel closes.
 		return m, listenForProgress(m.engine.Progress())
 
 	case diff.SyncStartMsg:
@@ -253,6 +245,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case diff.SyncAction:
 		return m.handleSyncAction(msg)
+
+	case diff.SyncProgressMsg:
+		m.diffView.SetSyncProgress(msg.Done, msg.Total, msg.Name)
+		return m, m.listenSyncProgress()
+
+	case diff.SyncRefreshMsg:
+		if msg.Err != nil {
+			m.statusBar.SetError(fmt.Sprintf("Sync error: %v", msg.Err))
+		}
+		m.diffView.SetEntries(msg.Entries, msg.HasRsync)
+		m.diffView.SetSize(m.width, m.height)
+		m.syncProgress = nil
+		return m, nil
+
+	case transferReadyMsg:
+		m.engine = msg.engine
+		m.statusBar.SetError("Transferring files...")
+		return m, listenForProgress(m.engine.Progress())
+
+	case transferDoneMsg:
+		// Engine finished (channel closed). Clean up and refresh panes.
+		jobCount := 0
+		if m.engine != nil {
+			jobCount = len(m.engine.Jobs())
+			m.engine = nil
+		}
+		if jobCount > 0 {
+			m.statusBar.SetError(fmt.Sprintf("Transferred %d item(s)", jobCount))
+		} else {
+			m.statusBar.SetError("Nothing to transfer")
+		}
+		return m, tea.Batch(
+			m.localPane.Refresh(),
+			m.remotePane.Refresh(),
+			clearErrorAfter(5*time.Second),
+		)
 
 	case clearErrorMsg:
 		m.statusBar.SetError("")
@@ -285,6 +313,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updatePicker(msg)
 	case stateConnecting:
 		return m.updateConnecting(msg)
+	case statePassword:
+		return m.updatePassword(msg)
 	case stateBrowser:
 		return m.updateBrowser(msg)
 	case stateSync:
@@ -300,6 +330,8 @@ func (m Model) View() string {
 		return m.picker.View()
 	case stateConnecting:
 		return m.viewConnecting()
+	case statePassword:
+		return m.viewPassword()
 	case stateBrowser:
 		return m.viewBrowser()
 	case stateSync:
@@ -360,6 +392,13 @@ func (m Model) updateConnecting(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.localPane.Init(), m.remotePane.Init())
 
 	case connectErrorMsg:
+		// If auth failed, prompt for password instead of going back to picker.
+		if strings.Contains(msg.err.Error(), "unable to authenticate") {
+			m.state = statePassword
+			m.passwordInput.SetValue("")
+			m.passwordInput.Focus()
+			return m, textinput.Blink
+		}
 		m.state = statePicker
 		m.err = msg.err
 		m.picker.SetError(fmt.Sprintf("Connection failed: %v", msg.err))
@@ -379,6 +418,47 @@ func (m Model) viewConnecting() string {
 	return lipgloss.NewStyle().Foreground(theme.White).Render(msg)
 }
 
+// --- State: Password ---
+
+func (m Model) updatePassword(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "enter":
+			password := m.passwordInput.Value()
+			m.passwordInput.SetValue("")
+			m.passwordInput.Blur()
+			m.state = stateConnecting
+			return m, tea.Batch(m.spinner.Tick, m.doConnectWithPassword(m.connectHost, password))
+		case "esc":
+			m.passwordInput.Blur()
+			m.state = statePicker
+			return m, nil
+		}
+	case connectSuccessMsg:
+		return m.updateConnecting(msg)
+	case connectErrorMsg:
+		return m.updateConnecting(msg)
+	}
+
+	var cmd tea.Cmd
+	m.passwordInput, cmd = m.passwordInput.Update(msg)
+	return m, cmd
+}
+
+func (m Model) viewPassword() string {
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.Cyan)
+	dimStyle := lipgloss.NewStyle().Foreground(theme.Dim)
+
+	content := fmt.Sprintf("\n\n   %s\n\n   %s\n   %s\n\n   %s",
+		titleStyle.Render(fmt.Sprintf("Password for %s", m.connectHost)),
+		m.passwordInput.View(),
+		"",
+		dimStyle.Render("Enter: submit  Esc: cancel"),
+	)
+	return content
+}
+
 // --- State: Browser ---
 
 func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -393,24 +473,9 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.helpOverlay.SetVisible(false)
 			return m, nil
 		}
-		if m.overlay.IsVisible() {
-			m.overlay.SetVisible(false)
-			return m, nil
-		}
 		if m.infoPanel.IsVisible() {
 			m.infoPanel.SetVisible(false)
 			return m, nil
-		}
-	}
-
-	// Handle overlay-specific keys when transfer overlay is visible.
-	if m.overlay.IsVisible() {
-		if msg, ok := msg.(tea.KeyMsg); ok {
-			switch msg.String() {
-			case "t":
-				m.overlay.Toggle()
-				return m, nil
-			}
 		}
 	}
 
@@ -424,14 +489,10 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		key := msg.String()
-		defer func() { m.lastKey = key }()
 
 		switch key {
-		case "t":
-			m.overlay.Toggle()
-			return m, nil
-
 		case "tab":
+			m.lastKey = key
 			m.activePane = 1 - m.activePane
 			m.localPane.SetActive(m.activePane == 0)
 			m.remotePane.SetActive(m.activePane == 1)
@@ -444,9 +505,11 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastKey = ""
 				return m.doYank(false)
 			}
+			m.lastKey = key
 			return m, nil
 
 		case "p":
+			m.lastKey = key
 			// paste
 			return m.doPaste()
 
@@ -456,30 +519,31 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastKey = ""
 				return m.startDelete()
 			}
+			m.lastKey = key
 			return m, nil
 
 		case "r":
-			// rename
+			m.lastKey = ""
 			return m.startRename()
 
 		case "m":
-			// move: yank as cut, then paste
+			m.lastKey = ""
 			return m.doYank(true)
 
 		case "D":
-			// mkdir
+			m.lastKey = ""
 			return m.startMkdir()
 
 		case "e":
-			// edit file
+			m.lastKey = ""
 			return m.startEdit()
 
-		case "S":
-			// sync/diff view
+		case "S", "ctrl+s":
+			m.lastKey = ""
 			return m.startSync()
 
 		case "i":
-			// toggle info panel
+			m.lastKey = ""
 			m.infoPanel.Toggle()
 			if m.infoPanel.IsVisible() {
 				if m.activePane == 0 {
@@ -492,17 +556,50 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "?":
-			// toggle help overlay
+			m.lastKey = ""
 			m.helpOverlay.Toggle()
 			return m, nil
 
 		case "R":
-			// Reconnect to the remote host.
+			m.lastKey = ""
 			if m.conn != nil {
 				m.statusBar.SetError("Reconnecting...")
 				return m, m.reconnect()
 			}
+
+		default:
+			m.lastKey = ""
 		}
+
+	case pane.TransferRequestMsg:
+		// Immediate transfer to the other pane.
+		var srcFS fs.FileSystem
+		var srcPath string
+		var dstFS fs.FileSystem
+		var dstPath string
+		if m.activePane == 0 {
+			srcFS = m.localPane.FS()
+			srcPath = m.localPane.Path()
+			dstFS = m.remotePane.FS()
+			dstPath = m.remotePane.Path()
+		} else {
+			srcFS = m.remotePane.FS()
+			srcPath = m.remotePane.Path()
+			dstFS = m.localPane.FS()
+			dstPath = m.localPane.Path()
+		}
+		engine := transfer.NewEngine(3, true)
+		go engine.Start()
+		entries := msg.Entries
+		go func() {
+			for _, entry := range entries {
+				engine.EnqueueEntry(entry, srcFS, srcPath, dstFS, dstPath)
+			}
+			engine.Done()
+		}()
+		m.engine = engine
+		m.statusBar.SetError(fmt.Sprintf("Transferring %d item(s)...", len(entries)))
+		return m, listenForProgress(engine.Progress())
 
 	case editor.EditSessionReadyMsg:
 		if msg.Err != nil {
@@ -594,6 +691,9 @@ func (m Model) updateSync(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // startSync kicks off an async comparison of local and remote directories.
+// If a directory is selected or under the cursor in the active pane, it
+// compares that directory against the matching path on the other side.
+// Otherwise it compares the two panes' current directories.
 func (m Model) startSync() (tea.Model, tea.Cmd) {
 	localFS := m.localPane.FS()
 	localPath := m.localPane.Path()
@@ -601,7 +701,40 @@ func (m Model) startSync() (tea.Model, tea.Cmd) {
 	remotePath := m.remotePane.Path()
 	sshClient := m.conn.Client
 
-	m.statusBar.SetError("Comparing directories...")
+	// If cursor is on a directory, sync that specific folder against the
+	// same-named folder on the other side.
+	var curEntry *fs.Entry
+	if m.activePane == 0 {
+		curEntry = m.localPane.CurrentEntry()
+	} else {
+		curEntry = m.remotePane.CurrentEntry()
+	}
+	scope := filepath.Base(localPath) // default: comparing the pane root
+	if curEntry != nil && curEntry.IsDir {
+		entry := curEntry
+		dirName := entry.Name
+		scope = dirName
+		if m.activePane == 0 {
+			localPath = entry.Path
+			// Only append dirName to remote if it doesn't already end with it.
+			if filepath.Base(remotePath) != dirName {
+				remotePath = filepath.Join(remotePath, dirName)
+			}
+		} else {
+			remotePath = entry.Path
+			// Only append dirName to local if it doesn't already end with it.
+			if filepath.Base(localPath) != dirName {
+				localPath = filepath.Join(localPath, dirName)
+			}
+		}
+	}
+
+	// Store sync roots so handleSyncAction uses the correct base paths.
+	m.syncLocalRoot = localPath
+	m.syncRemoteRoot = remotePath
+	m.diffView.SetScope(scope)
+
+	m.statusBar.SetError(fmt.Sprintf("Comparing %s ...", scope))
 
 	return m, func() tea.Msg {
 		entries, err := transfer.Compare(localFS, localPath, remoteFS, remotePath)
@@ -614,51 +747,101 @@ func (m Model) startSync() (tea.Model, tea.Cmd) {
 }
 
 // handleSyncAction processes a push/pull request from the diff view.
+// Transfers all items in a background goroutine, sending progress after each.
+// When all differing files are selected and the remote has rsync, uses rsync
+// for the transfer instead of file-by-file SFTP.
 func (m Model) handleSyncAction(action diff.SyncAction) (tea.Model, tea.Cmd) {
 	localFS := m.localPane.FS()
-	localPath := m.localPane.Path()
 	remoteFS := m.remotePane.FS()
-	remotePath := m.remotePane.Path()
+	localRoot := m.syncLocalRoot
+	remoteRoot := m.syncRemoteRoot
+	direction := action.Direction
+	diffEntries := action.Entries
+	total := len(diffEntries)
 
-	m.engine = transfer.NewEngine(2)
+	// Use rsync when all differing entries are selected and the remote supports it.
+	if m.diffView.HasRsync() && len(diffEntries) == m.diffView.DiffCount() {
+		progress := make(chan diff.SyncProgressMsg, 1)
+		m.syncProgress = progress
+		m.diffView.SetSyncing("rsync starting...")
 
-	for _, de := range action.Entries {
-		var srcFS, dstFS fs.FileSystem
-		var srcBase, dstBase string
+		host := m.conn.Host()
+		go func() {
+			rsyncProgress := make(chan string, 64)
+			errCh := make(chan error, 1)
 
-		if action.Direction == "push" {
-			// Local -> Remote
-			srcFS = localFS
-			srcBase = localPath
-			dstFS = remoteFS
-			dstBase = remotePath
-		} else {
-			// Remote -> Local
-			srcFS = remoteFS
-			srcBase = remotePath
-			dstFS = localFS
-			dstBase = localPath
-		}
+			go func() {
+				if direction == "push" {
+					errCh <- transfer.RsyncPush(localRoot, remoteRoot, host, rsyncProgress)
+				} else {
+					errCh <- transfer.RsyncPull(remoteRoot, localRoot, host, rsyncProgress)
+				}
+			}()
 
-		// Build the entry to enqueue.
-		var entry fs.Entry
-		if action.Direction == "push" && de.LocalEntry != nil {
-			entry = *de.LocalEntry
-		} else if action.Direction == "pull" && de.RemoteEntry != nil {
-			entry = *de.RemoteEntry
-		} else {
-			continue
-		}
+			for line := range rsyncProgress {
+				progress <- diff.SyncProgressMsg{Done: 0, Total: 0, Name: line}
+			}
 
-		m.engine.EnqueueEntry(entry, srcFS, srcBase, dstFS, dstBase)
+			if err := <-errCh; err != nil {
+				progress <- diff.SyncProgressMsg{Done: 0, Total: 0, Name: "rsync error: " + err.Error()}
+			}
+			close(progress)
+		}()
+
+		return m, m.listenSyncProgress()
 	}
 
-	go m.engine.Start()
+	progress := make(chan diff.SyncProgressMsg, total)
+	m.syncProgress = progress
 
-	m.statusBar.SetError(fmt.Sprintf("Syncing %d item(s) %s...", len(action.Entries), action.Direction))
+	m.diffView.SetSyncing(fmt.Sprintf("0/%d", total))
 
-	// Stay in sync view but listen for progress.
-	return m, listenForProgress(m.engine.Progress())
+	go func() {
+		for i, de := range diffEntries {
+			var srcFS, dstFS fs.FileSystem
+			var srcRoot, dstRoot string
+
+			if direction == "push" {
+				srcFS = localFS
+				srcRoot = localRoot
+				dstFS = remoteFS
+				dstRoot = remoteRoot
+			} else {
+				srcFS = remoteFS
+				srcRoot = remoteRoot
+				dstFS = localFS
+				dstRoot = localRoot
+			}
+
+			dstPath := filepath.Join(dstRoot, de.RelPath)
+
+			if de.IsDir {
+				_ = dstFS.Mkdir(dstPath, 0o755)
+			} else {
+				srcEntry := de.LocalEntry
+				if direction == "pull" {
+					srcEntry = de.RemoteEntry
+				}
+				if srcEntry != nil {
+					_ = dstFS.Mkdir(filepath.Dir(dstPath), 0o755)
+					srcPath := filepath.Join(srcRoot, de.RelPath)
+					if err := copyFile(srcFS, srcPath, dstFS, dstPath); err != nil {
+						// Continue on error — report in progress name.
+						progress <- diff.SyncProgressMsg{Done: i + 1, Total: total, Name: de.RelPath + " (error)"}
+						continue
+					}
+					if stat, err := srcFS.Stat(srcPath); err == nil && !stat.ModTime.IsZero() {
+						_ = dstFS.Chtimes(dstPath, stat.ModTime)
+					}
+				}
+			}
+
+			progress <- diff.SyncProgressMsg{Done: i + 1, Total: total, Name: de.RelPath}
+		}
+		close(progress)
+	}()
+
+	return m, m.listenSyncProgress()
 }
 
 func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -818,16 +1001,19 @@ func (m Model) doPaste() (tea.Model, tea.Cmd) {
 		dstPath = m.remotePane.Path()
 	}
 
-	m.engine = transfer.NewEngine(2)
-
-	for _, entry := range m.clip.entries {
-		m.engine.EnqueueEntry(entry, m.clip.srcFS, m.clip.srcPath, dstFS, dstPath)
-	}
-
-	// Start engine in background.
+	m.engine = transfer.NewEngine(2, true)
 	go m.engine.Start()
+	clipEntries := m.clip.entries
+	clipSrcFS := m.clip.srcFS
+	clipSrcPath := m.clip.srcPath
+	go func() {
+		for _, entry := range clipEntries {
+			m.engine.EnqueueEntry(entry, clipSrcFS, clipSrcPath, dstFS, dstPath)
+		}
+		m.engine.Done()
+	}()
 
-	m.statusBar.SetError(fmt.Sprintf("Transferring %d item(s)...", len(m.clip.entries)))
+	m.statusBar.SetError(fmt.Sprintf("Transferring %d item(s)...", len(clipEntries)))
 
 	return m, listenForProgress(m.engine.Progress())
 }
@@ -958,12 +1144,9 @@ func (m Model) viewBrowser() string {
 	sections = append(sections, bar)
 	base := lipgloss.JoinVertical(lipgloss.Left, sections...)
 
-	// Render full-screen overlays on top (highest priority first).
+	// Render full-screen overlays on top.
 	if m.helpOverlay.IsVisible() {
 		return m.helpOverlay.View()
-	}
-	if m.overlay.IsVisible() {
-		return m.overlay.View()
 	}
 
 	return base
@@ -989,7 +1172,7 @@ func (m *Model) handleResize() (tea.Model, tea.Cmd) {
 
 func (m *Model) setPaneSizes() {
 	paneWidth := (m.width) / 2
-	paneHeight := m.height - 1 // reserve 1 row for status bar
+	paneHeight := m.height - m.statusBar.Height() // reserve rows for status bar
 
 	// Reserve space for info panel if visible.
 	infoPanelHeight := m.infoPanel.Height()
@@ -998,7 +1181,6 @@ func (m *Model) setPaneSizes() {
 	m.localPane.SetSize(paneWidth, paneHeight)
 	m.remotePane.SetSize(m.width-paneWidth, paneHeight)
 	m.statusBar.SetWidth(m.width)
-	m.overlay.SetSize(m.width, m.height)
 	m.infoPanel.SetSize(m.width, infoPanelHeight)
 	m.helpOverlay.SetSize(m.width, m.height)
 }
@@ -1035,10 +1217,20 @@ func (m Model) activePaneInfo() (*pane.Model, fs.FileSystem, string) {
 }
 
 func (m Model) doConnect(host string) tea.Cmd {
+	return m.doConnectWithPassword(host, "")
+}
+
+func (m Model) doConnectWithPassword(host, password string) tea.Cmd {
 	return func() tea.Msg {
-		conn, err := ferrySSH.Connect(ferrySSH.ConnectOptions{
+		opts := ferrySSH.ConnectOptions{
 			Host: host,
-		})
+		}
+		if password != "" {
+			opts.PasswordCallback = func() (string, error) {
+				return password, nil
+			}
+		}
+		conn, err := ferrySSH.Connect(opts)
 		if err != nil {
 			return connectErrorMsg{err: err}
 		}
@@ -1047,13 +1239,38 @@ func (m Model) doConnect(host string) tea.Cmd {
 }
 
 // listenForProgress returns a Cmd that reads the next progress event from the channel.
+// When the channel is closed (engine finished), it sends transferDoneMsg.
 func listenForProgress(ch <-chan transfer.ProgressEvent) tea.Cmd {
 	return func() tea.Msg {
 		event, ok := <-ch
 		if !ok {
-			return nil
+			return transferDoneMsg{}
 		}
 		return progressMsg(event)
+	}
+}
+
+// listenSyncProgress reads the next sync progress event from the channel.
+// When closed (all transfers done), re-runs Compare and returns SyncRefreshMsg.
+func (m Model) listenSyncProgress() tea.Cmd {
+	ch := m.syncProgress
+	if ch == nil {
+		return nil
+	}
+	localFS := m.localPane.FS()
+	remoteFS := m.remotePane.FS()
+	localRoot := m.syncLocalRoot
+	remoteRoot := m.syncRemoteRoot
+	hasRsync := m.diffView.HasRsync()
+
+	return func() tea.Msg {
+		event, ok := <-ch
+		if !ok {
+			// All done — re-run Compare for final state.
+			entries, err := transfer.Compare(localFS, localRoot, remoteFS, remoteRoot)
+			return diff.SyncRefreshMsg{Entries: entries, HasRsync: hasRsync, Err: err}
+		}
+		return event
 	}
 }
 
@@ -1076,6 +1293,43 @@ func (m Model) reconnect() tea.Cmd {
 		}
 		return reconnectMsg{conn: conn}
 	}
+}
+
+// copyFile reads src and writes it to dst using an atomic temp file.
+// If the destination already matches the source (same size and mtime within 2s),
+// the copy is skipped.
+func copyFile(srcFS fs.FileSystem, srcPath string, dstFS fs.FileSystem, dstPath string) error {
+	srcStat, err := srcFS.Stat(srcPath)
+	var perm os.FileMode = 0o644
+	if err == nil && srcStat.Mode != 0 {
+		perm = srcStat.Mode
+	}
+
+	// Skip if destination already matches source.
+	if err == nil {
+		if dstStat, dstErr := dstFS.Stat(dstPath); dstErr == nil {
+			if dstStat.Size == srcStat.Size && !srcStat.ModTime.IsZero() &&
+				math.Abs(dstStat.ModTime.Sub(srcStat.ModTime).Seconds()) < 2 {
+				return nil
+			}
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := srcFS.Read(srcPath, &buf); err != nil {
+		return fmt.Errorf("read: %w", err)
+	}
+
+	tmpPath := dstPath + ".ferry-tmp"
+	if err := dstFS.Write(tmpPath, &buf, perm); err != nil {
+		_ = dstFS.Remove(tmpPath)
+		return fmt.Errorf("write: %w", err)
+	}
+	if err := dstFS.Rename(tmpPath, dstPath); err != nil {
+		_ = dstFS.Remove(tmpPath)
+		return fmt.Errorf("rename temp: %w", err)
+	}
+	return nil
 }
 
 // isConnectionError returns true if the error looks like a dropped connection.
