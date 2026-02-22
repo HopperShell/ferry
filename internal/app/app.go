@@ -14,6 +14,7 @@ import (
 	"github.com/andrewstuart/ferry/internal/fs"
 	ferrySSH "github.com/andrewstuart/ferry/internal/ssh"
 	"github.com/andrewstuart/ferry/internal/transfer"
+	"github.com/andrewstuart/ferry/internal/ui/modal"
 	"github.com/andrewstuart/ferry/internal/ui/pane"
 	"github.com/andrewstuart/ferry/internal/ui/picker"
 	"github.com/andrewstuart/ferry/internal/ui/statusbar"
@@ -88,6 +89,10 @@ type Model struct {
 	// Transfer overlay
 	overlay *transferUI.Overlay
 
+	// Info panel and help overlay
+	infoPanel   *modal.InfoPanel
+	helpOverlay *modal.HelpOverlay
+
 	// Error
 	err error
 }
@@ -104,11 +109,13 @@ func New() Model {
 	ti.CharLimit = 256
 
 	return Model{
-		state:      statePicker,
-		picker:     picker.New(hosts),
-		spinner:    sp,
-		inputField: ti,
-		overlay:    transferUI.NewOverlay(),
+		state:       statePicker,
+		picker:      picker.New(hosts),
+		spinner:     sp,
+		inputField:  ti,
+		overlay:     transferUI.NewOverlay(),
+		infoPanel:   modal.NewInfoPanel(),
+		helpOverlay: modal.NewHelpOverlay(),
 	}
 }
 
@@ -279,17 +286,37 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateInputMode(msg)
 	}
 
-	// Handle overlay-specific keys when visible.
+	// Handle Esc: close the highest-priority visible overlay.
+	if msg, ok := msg.(tea.KeyMsg); ok && msg.String() == "esc" {
+		if m.helpOverlay.IsVisible() {
+			m.helpOverlay.SetVisible(false)
+			return m, nil
+		}
+		if m.overlay.IsVisible() {
+			m.overlay.SetVisible(false)
+			return m, nil
+		}
+		if m.infoPanel.IsVisible() {
+			m.infoPanel.SetVisible(false)
+			return m, nil
+		}
+	}
+
+	// Handle overlay-specific keys when transfer overlay is visible.
 	if m.overlay.IsVisible() {
 		if msg, ok := msg.(tea.KeyMsg); ok {
 			switch msg.String() {
-			case "esc":
-				m.overlay.SetVisible(false)
-				return m, nil
 			case "t":
 				m.overlay.Toggle()
 				return m, nil
 			}
+		}
+	}
+
+	// Block pane navigation when help overlay is visible.
+	if m.helpOverlay.IsVisible() {
+		if _, ok := msg.(tea.KeyMsg); ok {
+			return m, nil
 		}
 	}
 
@@ -345,6 +372,24 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "e":
 			// edit file
 			return m.startEdit()
+
+		case "i":
+			// toggle info panel
+			m.infoPanel.Toggle()
+			if m.infoPanel.IsVisible() {
+				if m.activePane == 0 {
+					m.infoPanel.SetEntry(m.localPane.CurrentEntry())
+				} else {
+					m.infoPanel.SetEntry(m.remotePane.CurrentEntry())
+				}
+			}
+			m.setPaneSizes()
+			return m, nil
+
+		case "?":
+			// toggle help overlay
+			m.helpOverlay.Toggle()
+			return m, nil
 		}
 
 	case editor.EditSessionReadyMsg:
@@ -698,9 +743,19 @@ func (m Model) viewBrowser() string {
 		bar = m.statusBar.View()
 	}
 
-	base := lipgloss.JoinVertical(lipgloss.Left, panes, bar)
+	// Build the base layout: panes + optional info panel + status bar.
+	var sections []string
+	sections = append(sections, panes)
+	if m.infoPanel.IsVisible() {
+		sections = append(sections, m.infoPanel.View())
+	}
+	sections = append(sections, bar)
+	base := lipgloss.JoinVertical(lipgloss.Left, sections...)
 
-	// Render overlay on top if visible.
+	// Render full-screen overlays on top (highest priority first).
+	if m.helpOverlay.IsVisible() {
+		return m.helpOverlay.View()
+	}
 	if m.overlay.IsVisible() {
 		return m.overlay.View()
 	}
@@ -726,10 +781,16 @@ func (m *Model) setPaneSizes() {
 	paneWidth := (m.width) / 2
 	paneHeight := m.height - 1 // reserve 1 row for status bar
 
+	// Reserve space for info panel if visible.
+	infoPanelHeight := m.infoPanel.Height()
+	paneHeight -= infoPanelHeight
+
 	m.localPane.SetSize(paneWidth, paneHeight)
 	m.remotePane.SetSize(m.width-paneWidth, paneHeight)
 	m.statusBar.SetWidth(m.width)
 	m.overlay.SetSize(m.width, m.height)
+	m.infoPanel.SetSize(m.width, infoPanelHeight)
+	m.helpOverlay.SetSize(m.width, m.height)
 }
 
 func (m *Model) updateStatusSelection() {
@@ -744,6 +805,15 @@ func (m *Model) updateStatusSelection() {
 		count = 0
 	}
 	m.statusBar.SetSelection(count)
+
+	// Keep info panel entry in sync with cursor.
+	if m.infoPanel.IsVisible() {
+		if m.activePane == 0 {
+			m.infoPanel.SetEntry(m.localPane.CurrentEntry())
+		} else {
+			m.infoPanel.SetEntry(m.remotePane.CurrentEntry())
+		}
+	}
 }
 
 // activePaneInfo returns the active pane, its FS, and current path.
