@@ -341,7 +341,62 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "D":
 			// mkdir
 			return m.startMkdir()
+
+		case "e":
+			// edit file
+			return m.startEdit()
 		}
+
+	case editor.EditSessionReadyMsg:
+		if msg.Err != nil {
+			m.statusBar.SetError(fmt.Sprintf("Edit error: %v", msg.Err))
+			return m, nil
+		}
+		m.editSession = msg.Session
+		m.statusBar.SetError(fmt.Sprintf("Editing %s...", filepath.Base(msg.Session.RemotePath)))
+		return m, editor.OpenEditor(msg.Session)
+
+	case editor.EditorExitMsg:
+		if msg.Err != nil {
+			m.statusBar.SetError(fmt.Sprintf("Editor error: %v", msg.Err))
+			if msg.Session != nil {
+				editor.Cleanup(msg.Session)
+			}
+			m.editSession = nil
+			return m, nil
+		}
+		// Editor closed — check for changes and upload.
+		return m, editor.CheckAndUpload(msg.Session)
+
+	case editor.EditCompleteMsg:
+		m.editSession = nil
+		if msg.Err != nil {
+			m.statusBar.SetError(fmt.Sprintf("Edit error: %v", msg.Err))
+		} else if msg.Modified {
+			m.statusBar.SetError("File uploaded successfully")
+			// Refresh the remote pane to reflect changes.
+			return m, m.remotePane.Refresh()
+		} else {
+			m.statusBar.SetError("")
+		}
+		return m, nil
+
+	case editor.ConflictMsg:
+		// Remote file changed since download — show conflict modal.
+		m.editSession = msg.Session
+		m.inputMode = "confirm-conflict"
+		m.statusBar.SetError("Remote file changed! (o)verwrite / (r)e-download / (a)bort")
+		return m, nil
+
+	case editor.UploadCompleteMsg:
+		m.editSession = nil
+		if msg.Err != nil {
+			m.statusBar.SetError(fmt.Sprintf("Upload error: %v", msg.Err))
+		} else {
+			m.statusBar.SetError("File uploaded (overwritten)")
+			return m, m.remotePane.Refresh()
+		}
+		return m, nil
 	}
 
 	// Route message to active pane.
@@ -379,6 +434,32 @@ func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.inputMode == "confirm-delete" {
 			if msg.String() == "y" {
 				return m.executeDelete()
+			}
+			return m, nil
+		}
+
+		if m.inputMode == "confirm-conflict" {
+			switch msg.String() {
+			case "o":
+				// Overwrite: force upload.
+				m.inputMode = ""
+				return m, editor.ForceUpload(m.editSession)
+			case "r":
+				// Re-download: clean up and start over.
+				m.inputMode = ""
+				session := m.editSession
+				m.editSession = nil
+				remotePath := session.RemotePath
+				remoteFS := session.RemoteFS
+				editor.Cleanup(session)
+				return m, editor.StartEdit(remoteFS, remotePath)
+			case "a":
+				// Abort: clean up temp files.
+				m.inputMode = ""
+				editor.Cleanup(m.editSession)
+				m.editSession = nil
+				m.statusBar.SetError("Edit aborted")
+				return m, nil
 			}
 			return m, nil
 		}
@@ -570,6 +651,28 @@ func (m Model) startRename() (tea.Model, tea.Cmd) {
 	m.inputField.CursorEnd()
 
 	return m, textinput.Blink
+}
+
+// startEdit opens the current file in the user's editor.
+func (m Model) startEdit() (tea.Model, tea.Cmd) {
+	var entry *fs.Entry
+	if m.activePane == 0 {
+		entry = m.localPane.CurrentEntry()
+	} else {
+		entry = m.remotePane.CurrentEntry()
+	}
+	if entry == nil || entry.IsDir {
+		return m, nil
+	}
+
+	if m.activePane == 0 {
+		// Local file: open directly.
+		return m, editor.EditLocal(entry.Path)
+	}
+
+	// Remote file: download, edit, upload.
+	m.statusBar.SetError(fmt.Sprintf("Downloading %s...", entry.Name))
+	return m, editor.StartEdit(m.remotePane.FS(), entry.Path)
 }
 
 // startMkdir enters mkdir input mode.
