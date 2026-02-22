@@ -14,6 +14,7 @@ import (
 	"github.com/andrewstuart/ferry/internal/fs"
 	ferrySSH "github.com/andrewstuart/ferry/internal/ssh"
 	"github.com/andrewstuart/ferry/internal/transfer"
+	"github.com/andrewstuart/ferry/internal/ui/diff"
 	"github.com/andrewstuart/ferry/internal/ui/modal"
 	"github.com/andrewstuart/ferry/internal/ui/pane"
 	"github.com/andrewstuart/ferry/internal/ui/picker"
@@ -29,6 +30,7 @@ const (
 	statePicker     appState = iota // show connection picker
 	stateConnecting                 // show spinner while connecting
 	stateBrowser                    // dual-pane file browser
+	stateSync                       // sync/diff view
 )
 
 // Messages for async connect results.
@@ -93,6 +95,9 @@ type Model struct {
 	infoPanel   *modal.InfoPanel
 	helpOverlay *modal.HelpOverlay
 
+	// Sync/diff view
+	diffView diff.Model
+
 	// Error
 	err error
 }
@@ -116,6 +121,7 @@ func New() Model {
 		overlay:     transferUI.NewOverlay(),
 		infoPanel:   modal.NewInfoPanel(),
 		helpOverlay: modal.NewHelpOverlay(),
+		diffView:    diff.New(),
 	}
 }
 
@@ -142,7 +148,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "q":
-			if m.state == stateBrowser && m.inputMode == "" {
+			if (m.state == stateBrowser || m.state == stateSync) && m.inputMode == "" {
 				if m.engine != nil {
 					m.engine.Cancel()
 				}
@@ -176,6 +182,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.clip = nil
 			}
+			// If we were in sync state, return to browser.
+			if m.state == stateSync {
+				m.state = stateBrowser
+				return m, tea.Batch(
+					m.localPane.Refresh(),
+					m.remotePane.Refresh(),
+					listenForProgress(m.engine.Progress()),
+				)
+			}
 			return m, tea.Batch(
 				m.localPane.Refresh(),
 				m.remotePane.Refresh(),
@@ -183,6 +198,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		return m, listenForProgress(m.engine.Progress())
+
+	case diff.SyncStartMsg:
+		m.state = stateSync
+		m.diffView.SetEntries(msg.Entries, msg.HasRsync)
+		m.diffView.SetSize(m.width, m.height)
+		return m, nil
+
+	case diff.SyncCompleteMsg:
+		m.state = stateBrowser
+		if msg.Err != nil {
+			m.statusBar.SetError(fmt.Sprintf("Sync error: %v", msg.Err))
+		} else {
+			m.statusBar.SetError("Sync complete")
+		}
+		return m, tea.Batch(m.localPane.Refresh(), m.remotePane.Refresh())
+
+	case diff.SyncAction:
+		return m.handleSyncAction(msg)
 	}
 
 	switch m.state {
@@ -192,6 +225,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateConnecting(msg)
 	case stateBrowser:
 		return m.updateBrowser(msg)
+	case stateSync:
+		return m.updateSync(msg)
 	}
 
 	return m, nil
@@ -205,6 +240,8 @@ func (m Model) View() string {
 		return m.viewConnecting()
 	case stateBrowser:
 		return m.viewBrowser()
+	case stateSync:
+		return m.diffView.View()
 	}
 	return ""
 }
@@ -373,6 +410,10 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// edit file
 			return m.startEdit()
 
+		case "S":
+			// sync/diff view
+			return m.startSync()
+
 		case "i":
 			// toggle info panel
 			m.infoPanel.Toggle()
@@ -453,6 +494,90 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	m.updateStatusSelection()
 	return m, cmd
+}
+
+// --- State: Sync ---
+
+func (m Model) updateSync(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if msg.String() == "esc" {
+			m.state = stateBrowser
+			return m, tea.Batch(m.localPane.Refresh(), m.remotePane.Refresh())
+		}
+	}
+
+	var cmd tea.Cmd
+	m.diffView, cmd = m.diffView.Update(msg)
+	return m, cmd
+}
+
+// startSync kicks off an async comparison of local and remote directories.
+func (m Model) startSync() (tea.Model, tea.Cmd) {
+	localFS := m.localPane.FS()
+	localPath := m.localPane.Path()
+	remoteFS := m.remotePane.FS()
+	remotePath := m.remotePane.Path()
+	sshClient := m.conn.Client
+
+	m.statusBar.SetError("Comparing directories...")
+
+	return m, func() tea.Msg {
+		entries, err := transfer.Compare(localFS, localPath, remoteFS, remotePath)
+		if err != nil {
+			return diff.SyncCompleteMsg{Err: err}
+		}
+		hasRsync := transfer.HasRsync(sshClient)
+		return diff.SyncStartMsg{Entries: entries, HasRsync: hasRsync}
+	}
+}
+
+// handleSyncAction processes a push/pull request from the diff view.
+func (m Model) handleSyncAction(action diff.SyncAction) (tea.Model, tea.Cmd) {
+	localFS := m.localPane.FS()
+	localPath := m.localPane.Path()
+	remoteFS := m.remotePane.FS()
+	remotePath := m.remotePane.Path()
+
+	m.engine = transfer.NewEngine(2)
+
+	for _, de := range action.Entries {
+		var srcFS, dstFS fs.FileSystem
+		var srcBase, dstBase string
+
+		if action.Direction == "push" {
+			// Local -> Remote
+			srcFS = localFS
+			srcBase = localPath
+			dstFS = remoteFS
+			dstBase = remotePath
+		} else {
+			// Remote -> Local
+			srcFS = remoteFS
+			srcBase = remotePath
+			dstFS = localFS
+			dstBase = localPath
+		}
+
+		// Build the entry to enqueue.
+		var entry fs.Entry
+		if action.Direction == "push" && de.LocalEntry != nil {
+			entry = *de.LocalEntry
+		} else if action.Direction == "pull" && de.RemoteEntry != nil {
+			entry = *de.RemoteEntry
+		} else {
+			continue
+		}
+
+		m.engine.EnqueueEntry(entry, srcFS, srcBase, dstFS, dstBase)
+	}
+
+	go m.engine.Start()
+
+	m.statusBar.SetError(fmt.Sprintf("Syncing %d item(s) %s...", len(action.Entries), action.Direction))
+
+	// Stay in sync view but listen for progress.
+	return m, listenForProgress(m.engine.Progress())
 }
 
 func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -773,6 +898,8 @@ func (m *Model) handleResize() (tea.Model, tea.Cmd) {
 		return m, cmd
 	case stateBrowser:
 		m.setPaneSizes()
+	case stateSync:
+		m.diffView.SetSize(m.width, m.height)
 	}
 	return m, nil
 }
