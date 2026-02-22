@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"errors"
 	"io"
 	"os"
 	"strconv"
@@ -9,6 +10,8 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
+
+var errNoClient = errors.New("sftp: not connected")
 
 type RemoteFS struct {
 	client *sftp.Client
@@ -23,6 +26,9 @@ func NewRemoteFS(sshClient *ssh.Client) (*RemoteFS, error) {
 }
 
 func (r *RemoteFS) List(path string) ([]Entry, error) {
+	if r.client == nil {
+		return nil, errNoClient
+	}
 	infos, err := r.client.ReadDir(path)
 	if err != nil {
 		return nil, err
@@ -35,6 +41,9 @@ func (r *RemoteFS) List(path string) ([]Entry, error) {
 }
 
 func (r *RemoteFS) Stat(path string) (Entry, error) {
+	if r.client == nil {
+		return Entry{}, errNoClient
+	}
 	info, err := r.client.Stat(path)
 	if err != nil {
 		return Entry{}, err
@@ -43,6 +52,9 @@ func (r *RemoteFS) Stat(path string) (Entry, error) {
 }
 
 func (r *RemoteFS) Read(path string, w io.Writer) error {
+	if r.client == nil {
+		return errNoClient
+	}
 	f, err := r.client.Open(path)
 	if err != nil {
 		return err
@@ -53,6 +65,9 @@ func (r *RemoteFS) Read(path string, w io.Writer) error {
 }
 
 func (r *RemoteFS) Write(path string, rd io.Reader, perm os.FileMode) error {
+	if r.client == nil {
+		return errNoClient
+	}
 	f, err := r.client.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
 	if err != nil {
 		return err
@@ -65,10 +80,16 @@ func (r *RemoteFS) Write(path string, rd io.Reader, perm os.FileMode) error {
 }
 
 func (r *RemoteFS) Mkdir(path string, perm os.FileMode) error {
+	if r.client == nil {
+		return errNoClient
+	}
 	return r.client.MkdirAll(path)
 }
 
 func (r *RemoteFS) Remove(path string) error {
+	if r.client == nil {
+		return errNoClient
+	}
 	info, err := r.client.Stat(path)
 	if err != nil {
 		return err
@@ -100,14 +121,23 @@ func (r *RemoteFS) removeAll(path string) error {
 }
 
 func (r *RemoteFS) Rename(old, new string) error {
+	if r.client == nil {
+		return errNoClient
+	}
 	return r.client.Rename(old, new)
 }
 
 func (r *RemoteFS) Chmod(path string, perm os.FileMode) error {
+	if r.client == nil {
+		return errNoClient
+	}
 	return r.client.Chmod(path, perm)
 }
 
 func (r *RemoteFS) HomeDir() (string, error) {
+	if r.client == nil {
+		return "", errNoClient
+	}
 	return r.client.Getwd()
 }
 

@@ -3,7 +3,10 @@ package app
 
 import (
 	"fmt"
+	"io"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -47,6 +50,15 @@ type progressMsg transfer.ProgressEvent
 
 // transferDoneMsg signals that all transfers have completed.
 type transferDoneMsg struct{}
+
+// clearErrorMsg is sent after a timeout to auto-dismiss the status bar error.
+type clearErrorMsg struct{}
+
+// reconnectMsg carries the result of a reconnect attempt.
+type reconnectMsg struct {
+	conn *ferrySSH.Connection
+	err  error
+}
 
 // clipboard stores yanked/cut entries for paste operations.
 type clipboard struct {
@@ -183,7 +195,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case progressMsg:
 		evt := transfer.ProgressEvent(msg)
 		if evt.Done && evt.Err != nil {
-			m.statusBar.SetError(fmt.Sprintf("Transfer failed: %s: %v", evt.Name, evt.Err))
+			if isConnectionError(evt.Err) {
+				m.statusBar.SetError("Connection lost. Press R to reconnect.")
+			} else {
+				m.statusBar.SetError(fmt.Sprintf("Transfer failed: %s: %v", evt.Name, evt.Err))
+			}
 		}
 		// Update overlay with progress and job list.
 		m.overlay.UpdateProgress(evt)
@@ -233,10 +249,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusBar.SetError("Sync complete")
 		}
-		return m, tea.Batch(m.localPane.Refresh(), m.remotePane.Refresh())
+		return m, tea.Batch(m.localPane.Refresh(), m.remotePane.Refresh(), clearErrorAfter(5*time.Second))
 
 	case diff.SyncAction:
 		return m.handleSyncAction(msg)
+
+	case clearErrorMsg:
+		m.statusBar.SetError("")
+		return m, nil
+
+	case reconnectMsg:
+		if msg.err != nil {
+			m.statusBar.SetError(fmt.Sprintf("Reconnect failed: %v", msg.err))
+			return m, clearErrorAfter(5 * time.Second)
+		}
+		// Reconnect succeeded — rebuild remote FS and pane.
+		m.conn = msg.conn
+		remoteFS, err := fs.NewRemoteFS(m.conn.Client)
+		if err != nil {
+			m.statusBar.SetError(fmt.Sprintf("Reconnect sftp error: %v", err))
+			return m, clearErrorAfter(5 * time.Second)
+		}
+		m.remotePane = pane.New(remoteFS, "Remote")
+		m.remotePane.SetActive(m.activePane == 1)
+		m.setPaneSizes()
+		cfg := m.conn.Config
+		connInfo := fmt.Sprintf("%s@%s:%s", cfg.User, cfg.HostName, cfg.Port)
+		m.statusBar.SetConnection(connInfo)
+		m.statusBar.SetError("Reconnected")
+		return m, tea.Batch(m.remotePane.Init(), clearErrorAfter(3*time.Second))
 	}
 
 	switch m.state {
@@ -275,6 +316,7 @@ func (m Model) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateConnecting
 		m.connectHost = msg.Host
 		m.err = nil
+		m.picker.SetError("")
 		return m, tea.Batch(m.spinner.Tick, m.doConnect(msg.Host))
 	}
 
@@ -320,6 +362,7 @@ func (m Model) updateConnecting(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case connectErrorMsg:
 		m.state = statePicker
 		m.err = msg.err
+		m.picker.SetError(fmt.Sprintf("Connection failed: %v", msg.err))
 		return m, nil
 
 	case spinner.TickMsg:
@@ -452,6 +495,13 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// toggle help overlay
 			m.helpOverlay.Toggle()
 			return m, nil
+
+		case "R":
+			// Reconnect to the remote host.
+			if m.conn != nil {
+				m.statusBar.SetError("Reconnecting...")
+				return m, m.reconnect()
+			}
 		}
 
 	case editor.EditSessionReadyMsg:
@@ -479,10 +529,11 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editSession = nil
 		if msg.Err != nil {
 			m.statusBar.SetError(fmt.Sprintf("Edit error: %v", msg.Err))
+			return m, clearErrorAfter(5 * time.Second)
 		} else if msg.Modified {
 			m.statusBar.SetError("File uploaded successfully")
 			// Refresh the remote pane to reflect changes.
-			return m, m.remotePane.Refresh()
+			return m, tea.Batch(m.remotePane.Refresh(), clearErrorAfter(3*time.Second))
 		} else {
 			m.statusBar.SetError("")
 		}
@@ -738,7 +789,7 @@ func (m Model) doYank(cut bool) (tea.Model, tea.Cmd) {
 	}
 	m.statusBar.SetError(fmt.Sprintf("%s %d item(s)", action, len(entries)))
 
-	return m, nil
+	return m, clearErrorAfter(3 * time.Second)
 }
 
 // doPaste creates transfer jobs from clipboard to the current pane's directory.
@@ -917,6 +968,8 @@ func (m *Model) handleResize() (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.picker, cmd = m.picker.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
 		return m, cmd
+	case stateConnecting:
+		// No special layout needed, but store the size.
 	case stateBrowser:
 		m.setPaneSizes()
 	case stateSync:
@@ -993,4 +1046,41 @@ func listenForProgress(ch <-chan transfer.ProgressEvent) tea.Cmd {
 		}
 		return progressMsg(event)
 	}
+}
+
+// clearErrorAfter returns a Cmd that sends a clearErrorMsg after the given duration.
+func clearErrorAfter(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(_ time.Time) tea.Msg {
+		return clearErrorMsg{}
+	})
+}
+
+// reconnect attempts to re-establish the SSH connection using the same host.
+func (m Model) reconnect() tea.Cmd {
+	host := m.conn.Host()
+	return func() tea.Msg {
+		conn, err := ferrySSH.Connect(ferrySSH.ConnectOptions{
+			Host: host,
+		})
+		if err != nil {
+			return reconnectMsg{err: err}
+		}
+		return reconnectMsg{conn: conn}
+	}
+}
+
+// isConnectionError returns true if the error looks like a dropped connection.
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == io.EOF {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, io.EOF.Error())
 }

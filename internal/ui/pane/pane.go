@@ -2,6 +2,7 @@ package pane
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -32,6 +33,7 @@ type Model struct {
 	label       string // "Local" or "Remote"
 	path        string // current directory path
 	entries     []fs.Entry
+	loaded      bool   // whether the first listing has completed
 	cursor      int
 	offset      int // scroll offset for viewport
 	selected    map[string]bool
@@ -143,6 +145,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case entriesMsg:
 		m.path = msg.path
 		m.entries = sortEntries(msg.entries)
+		m.loaded = true
 		m.cursor = 0
 		m.offset = 0
 		m.err = nil
@@ -150,6 +153,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.search = false
 		m.searchInput.SetValue("")
 		m.applyFilters()
+		m.clampCursor()
 		return m, nil
 
 	case errMsg:
@@ -326,14 +330,25 @@ func (m Model) View() string {
 	// File list.
 	var rows []string
 	visCount := m.visibleCount()
-	for i := m.offset; i < m.offset+listH && i < visCount; i++ {
-		idx := m.mapIndex(i)
-		if idx < 0 || idx >= len(m.entries) {
-			continue
+
+	if !m.loaded {
+		// First listing hasn't completed yet.
+		loadingMsg := lipgloss.NewStyle().Foreground(theme.Dim).Italic(true).Render("Loading...")
+		rows = append(rows, loadingMsg)
+	} else if visCount == 0 {
+		// Directory is empty (or all entries filtered out).
+		emptyMsg := lipgloss.NewStyle().Foreground(theme.Dim).Italic(true).Render("(empty)")
+		rows = append(rows, emptyMsg)
+	} else {
+		for i := m.offset; i < m.offset+listH && i < visCount; i++ {
+			idx := m.mapIndex(i)
+			if idx < 0 || idx >= len(m.entries) {
+				continue
+			}
+			e := m.entries[idx]
+			row := m.renderRow(e, i, contentWidth)
+			rows = append(rows, row)
 		}
-		e := m.entries[idx]
-		row := m.renderRow(e, i, contentWidth)
-		rows = append(rows, row)
 	}
 	// Pad remaining lines.
 	for len(rows) < listH {
@@ -373,9 +388,15 @@ func (m Model) View() string {
 // --- Internal helpers ---
 
 func (m Model) listDir(path string) tea.Cmd {
+	prevPath := m.path
 	return func() tea.Msg {
 		entries, err := m.fs.List(path)
 		if err != nil {
+			// If we were navigating to a new dir, fall back to the previous
+			// directory so we don't strand the user in an unlistable location.
+			if path != prevPath {
+				return errMsg{err: fmt.Errorf("%s: %w", filepath.Base(path), err)}
+			}
 			return errMsg{err: err}
 		}
 		return entriesMsg{path: path, entries: entries}
@@ -473,6 +494,22 @@ func (m *Model) ensureVisible() {
 	}
 }
 
+// clampCursor ensures the cursor stays within valid bounds.
+func (m *Model) clampCursor() {
+	vc := m.visibleCount()
+	if vc == 0 {
+		m.cursor = 0
+		m.offset = 0
+		return
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor >= vc {
+		m.cursor = vc - 1
+	}
+}
+
 func (m Model) renderRow(e fs.Entry, cursorPos int, width int) string {
 	isCursor := cursorPos == m.cursor
 	isSel := m.selected[e.Path]
@@ -488,7 +525,7 @@ func (m Model) renderRow(e fs.Entry, cursorPos int, width int) string {
 		name += "/"
 	}
 	if len(name) > nameWidth {
-		name = name[:nameWidth-1] + "~"
+		name = name[:nameWidth-1] + "\u2026" // ellipsis character
 	}
 
 	size := formatSize(e.Size)
@@ -503,6 +540,8 @@ func (m Model) renderRow(e fs.Entry, cursorPos int, width int) string {
 	switch {
 	case e.IsDir:
 		nameStyled = theme.DirStyle.Render(name)
+	case e.Mode&os.ModeSymlink != 0:
+		nameStyled = theme.LinkStyle.Render(name)
 	case e.Mode&0o111 != 0:
 		nameStyled = theme.ExecStyle.Render(name)
 	default:
