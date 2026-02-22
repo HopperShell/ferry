@@ -102,8 +102,19 @@ type Model struct {
 	err error
 }
 
-// New creates the initial app model.
+// Options configures how the app starts.
+type Options struct {
+	Host string // If set, skip picker and connect directly
+}
+
+// New creates the initial app model with the connection picker.
 func New() Model {
+	return NewWithOptions(Options{})
+}
+
+// NewWithOptions creates the initial app model with the given options.
+// If opts.Host is set, the picker is skipped and a direct connection is initiated.
+func NewWithOptions(opts Options) Model {
 	hosts, _ := ferrySSH.ParseConfigHosts(ferrySSH.DefaultConfigPath())
 
 	sp := spinner.New()
@@ -113,7 +124,7 @@ func New() Model {
 	ti := textinput.New()
 	ti.CharLimit = 256
 
-	return Model{
+	m := Model{
 		state:       statePicker,
 		picker:      picker.New(hosts),
 		spinner:     sp,
@@ -123,9 +134,19 @@ func New() Model {
 		helpOverlay: modal.NewHelpOverlay(),
 		diffView:    diff.New(),
 	}
+
+	if opts.Host != "" {
+		m.state = stateConnecting
+		m.connectHost = opts.Host
+	}
+
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
+	if m.state == stateConnecting {
+		return tea.Batch(m.spinner.Tick, m.doConnect(m.connectHost))
+	}
 	return tea.Batch(m.picker.Init(), m.spinner.Tick)
 }
 
