@@ -16,14 +16,18 @@ import (
 	"github.com/sahilm/fuzzy"
 )
 
-// Messages for async directory listing.
+// Messages for async directory listing. The label field identifies which pane
+// the message belongs to, so messages routed to both panes are only accepted
+// by the correct one.
 type entriesMsg struct {
+	label   string
 	path    string
 	entries []fs.Entry
 }
 
 type errMsg struct {
-	err error
+	label string
+	err   error
 }
 
 // Model is a file browser pane component. It is NOT an independent Bubble Tea
@@ -126,6 +130,7 @@ func (m *Model) NavigateTo(path string) tea.Cmd {
 
 // Init loads the initial directory (home or root).
 func (m Model) Init() tea.Cmd {
+	label := m.label
 	return func() tea.Msg {
 		home, err := m.fs.HomeDir()
 		if err != nil {
@@ -133,9 +138,9 @@ func (m Model) Init() tea.Cmd {
 		}
 		entries, err := m.fs.List(home)
 		if err != nil {
-			return errMsg{err: err}
+			return errMsg{label: label, err: err}
 		}
-		return entriesMsg{path: home, entries: entries}
+		return entriesMsg{label: label, path: home, entries: entries}
 	}
 }
 
@@ -143,6 +148,9 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case entriesMsg:
+		if msg.label != m.label {
+			return m, nil // not for this pane
+		}
 		m.path = msg.path
 		m.entries = sortEntries(msg.entries)
 		m.loaded = true
@@ -157,6 +165,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case errMsg:
+		if msg.label != m.label {
+			return m, nil // not for this pane
+		}
 		m.err = msg.err
 		return m, nil
 
@@ -389,17 +400,16 @@ func (m Model) View() string {
 
 func (m Model) listDir(path string) tea.Cmd {
 	prevPath := m.path
+	label := m.label
 	return func() tea.Msg {
 		entries, err := m.fs.List(path)
 		if err != nil {
-			// If we were navigating to a new dir, fall back to the previous
-			// directory so we don't strand the user in an unlistable location.
 			if path != prevPath {
-				return errMsg{err: fmt.Errorf("%s: %w", filepath.Base(path), err)}
+				return errMsg{label: label, err: fmt.Errorf("%s: %w", filepath.Base(path), err)}
 			}
-			return errMsg{err: err}
+			return errMsg{label: label, err: err}
 		}
-		return entriesMsg{path: path, entries: entries}
+		return entriesMsg{label: label, path: path, entries: entries}
 	}
 }
 

@@ -557,12 +557,21 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Route message to active pane.
+	// Route key messages to active pane only; route all other messages
+	// (async responses like entriesMsg, errMsg) to BOTH panes so each
+	// pane can claim its own async results.
 	var cmd tea.Cmd
-	if m.activePane == 0 {
-		m.localPane, cmd = m.localPane.Update(msg)
+	if _, isKey := msg.(tea.KeyMsg); isKey {
+		if m.activePane == 0 {
+			m.localPane, cmd = m.localPane.Update(msg)
+		} else {
+			m.remotePane, cmd = m.remotePane.Update(msg)
+		}
 	} else {
-		m.remotePane, cmd = m.remotePane.Update(msg)
+		var cmd1, cmd2 tea.Cmd
+		m.localPane, cmd1 = m.localPane.Update(msg)
+		m.remotePane, cmd2 = m.remotePane.Update(msg)
+		cmd = tea.Batch(cmd1, cmd2)
 	}
 	m.updateStatusSelection()
 	return m, cmd
