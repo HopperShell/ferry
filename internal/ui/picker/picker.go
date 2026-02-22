@@ -25,6 +25,12 @@ type Model struct {
 	cursor   int
 	width    int
 	height   int
+	errMsg   string
+}
+
+// SetError sets an error message to display in the picker.
+func (m *Model) SetError(msg string) {
+	m.errMsg = msg
 }
 
 func New(hosts []ferrySSH.HostEntry) Model {
@@ -145,6 +151,10 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
+	if m.errMsg != "" {
+		errLine := lipgloss.NewStyle().Foreground(theme.Red).Bold(true).Render("  " + m.errMsg)
+		b.WriteString(errLine + "\n")
+	}
 	footer := lipgloss.NewStyle().Foreground(theme.Dim).Render("  enter:connect  esc:quit")
 	b.WriteString(footer)
 

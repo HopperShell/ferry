@@ -116,6 +116,21 @@ func (c *Connection) Close() error {
 	return c.Client.Close()
 }
 
+// Host returns the original host alias used to create this connection.
+func (c *Connection) Host() string {
+	return c.host
+}
+
+// IsAlive checks whether the SSH connection is still responsive by sending a
+// keepalive request.
+func (c *Connection) IsAlive() bool {
+	if c.Client == nil {
+		return false
+	}
+	_, _, err := c.Client.SendRequest("keepalive@openssh.com", true, nil)
+	return err == nil
+}
+
 func (c *Connection) keepalive() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
