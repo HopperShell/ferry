@@ -150,12 +150,24 @@ func (c *Connection) keepalive() {
 func buildAuthMethods(cfg *ResolvedConfig, opts ConnectOptions) []ssh.AuthMethod {
 	var methods []ssh.AuthMethod
 
+	// Collect all signers into a single PublicKeys method.
+	// Go's x/crypto/ssh treats each AuthMethod as a separate "attempt" for the
+	// publickey method. If agent keys and file keys are separate AuthMethods,
+	// the server may reject the agent key and then refuse further publickey
+	// attempts (MaxAuthTries). Combining them into one method lets the library
+	// try all keys in a single publickey auth exchange.
+	var signers []ssh.Signer
+
+	// Agent keys
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
 		if conn, err := net.Dial("unix", sock); err == nil {
-			methods = append(methods, ssh.PublicKeysCallback(agent.NewClient(conn).Signers))
+			if agentSigners, err := agent.NewClient(conn).Signers(); err == nil {
+				signers = append(signers, agentSigners...)
+			}
 		}
 	}
 
+	// Identity file keys
 	for _, keyPath := range cfg.IdentityFile {
 		expanded := expandPath(keyPath)
 		key, err := os.ReadFile(expanded)
@@ -164,18 +176,24 @@ func buildAuthMethods(cfg *ResolvedConfig, opts ConnectOptions) []ssh.AuthMethod
 		}
 		signer, err := ssh.ParsePrivateKey(key)
 		if err != nil {
+			// Might be encrypted — try passphrase
 			if opts.PassphraseCallback != nil {
 				if passphrase, cbErr := opts.PassphraseCallback(expanded); cbErr == nil {
 					if signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(passphrase)); err == nil {
-						methods = append(methods, ssh.PublicKeys(signer))
+						signers = append(signers, signer)
 					}
 				}
 			}
 			continue
 		}
-		methods = append(methods, ssh.PublicKeys(signer))
+		signers = append(signers, signer)
 	}
 
+	if len(signers) > 0 {
+		methods = append(methods, ssh.PublicKeys(signers...))
+	}
+
+	// Password auth as fallback
 	if opts.PasswordCallback != nil {
 		methods = append(methods, ssh.PasswordCallback(func() (string, error) {
 			return opts.PasswordCallback()
