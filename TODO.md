@@ -33,8 +33,8 @@
 - [ ] Customizable color themes
 - [ ] Search match count indicator
 - [ ] Persistent error log (scrollable, not auto-dismiss)
-- [ ] Sortable file list (by name, size, date)
-- [ ] File size totals for selections
+- [x] Sortable file list (by name, size, date)
+- [x] File size totals for selections
 
 ## Performance
 
