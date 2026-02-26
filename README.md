@@ -47,6 +47,26 @@ Download a prebuilt binary from the [Releases](https://github.com/andrewstuart/f
 brew install andrewstuart/tap/ferry
 ``` -->
 
+## Quick Start
+
+```sh
+# Install
+go install github.com/andrewstuart/ferry/cmd/ferry@latest
+
+# Connect to a host (or just run `ferry` to pick from ~/.ssh/config)
+ferry myhost
+```
+
+Once connected you'll see two panes — local files on the left, remote on the right.
+
+1. **Navigate** — `j`/`k` to move, `l` to open a directory, `h` to go back
+2. **Select files** — `Space` to select, `V` for range select
+3. **Copy across** — `yy` to yank, `Tab` to switch panes, `p` to paste
+4. **Sync directories** — `S` to compare and selectively push/pull
+5. **Edit remote files** — `e` opens in `$EDITOR` with conflict detection
+
+Press `?` for the full keybinding reference.
+
 ## Usage
 
 ```
