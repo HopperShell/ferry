@@ -1,34 +1,34 @@
-```
-   ___
-  / _/__ ____________  __
- / _/ -_) __/ __/ // /
-/_/ \__/_/ /_/  \_, /
-               /___/
-```
+<p align="center">
+  <img src="logo-concepts/ferry-logo.png" alt="ferry" width="480" />
+</p>
 
-**Secure file transfer, terminal style.**
+<p align="center">
+  <strong>Secure file transfer, terminal style.</strong>
+</p>
 
-<!-- badges -->
-<!-- [![Go Report Card](https://goreportcard.com/badge/github.com/andrewstuart/ferry)](https://goreportcard.com/report/github.com/andrewstuart/ferry) -->
-<!-- [![Release](https://img.shields.io/github/v/release/andrewstuart/ferry)](https://github.com/andrewstuart/ferry/releases) -->
-<!-- [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) -->
+<!-- <p align="center">
+  <a href="https://goreportcard.com/report/github.com/andrewstuart/ferry"><img src="https://goreportcard.com/badge/github.com/andrewstuart/ferry" alt="Go Report Card"></a>
+  <a href="https://github.com/andrewstuart/ferry/releases"><img src="https://img.shields.io/github/v/release/andrewstuart/ferry" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+</p> -->
 
 ---
 
-## What is ferry
-
-Ferry is a terminal-based file transfer tool built for engineers who live in the terminal. It provides a dual-pane file browser (local on the left, remote on the right) over SSH, with vim-style keybindings, visual directory sync, and remote file editing -- all without leaving the command line.
+Ferry is a terminal-based file transfer tool built for engineers who live in the terminal. Dual-pane file browser (local + remote) over SSH, with vim-style keybindings, visual directory sync, and remote file editing — all without leaving the command line.
 
 ## Features
 
-- Dual-pane file browser (local and remote side by side)
-- Full SSH config support (ssh-agent forwarding, ProxyJump, encrypted keys)
-- Visual sync/diff mode (compare directories, selective transfer)
-- Remote file editing ($EDITOR with shadow copy and conflict detection)
-- Transfer progress with speed and ETA
-- Fuzzy connection picker from ~/.ssh/config
-- Vim-style keybindings with arrow key support
-- rsync integration for fast delta transfers
+- **Dual-pane browser** — Local and remote side by side
+- **Full SSH config support** — ssh-agent, ProxyJump, encrypted keys, `~/.ssh/config` includes
+- **Visual sync/diff** — Compare directories, selective push/pull
+- **Remote file editing** — `$EDITOR` with shadow copy and conflict detection
+- **Resumable transfers** — Interrupted transfers pick up where they left off, failed transfers retry automatically
+- **Transfer progress** — Speed, ETA, concurrent workers
+- **Overwrite protection** — Confirms before overwriting existing files
+- **Sortable file list** — Sort by name, size, or date; selection size totals
+- **Fuzzy connection picker** — Search your `~/.ssh/config` hosts
+- **Vim keybindings** — With arrow key support for the rest of us
+- **rsync integration** — Fast delta transfers when available
 
 ## Install
 
@@ -42,10 +42,10 @@ go install github.com/andrewstuart/ferry/cmd/ferry@latest
 
 Download a prebuilt binary from the [Releases](https://github.com/andrewstuart/ferry/releases) page.
 
-<!-- ### Homebrew -->
-<!-- ```sh -->
-<!-- brew install andrewstuart/tap/ferry -->
-<!-- ``` -->
+<!-- ### Homebrew
+```sh
+brew install andrewstuart/tap/ferry
+``` -->
 
 ## Usage
 
@@ -54,13 +54,6 @@ ferry                     # Launch connection picker
 ferry myhost              # Connect to SSH host
 ferry user@host           # Connect with explicit user
 ferry user@host:port      # Connect with user and port
-```
-
-Flags:
-
-```
-ferry -v                  # Show version
-ferry --version           # Show version
 ```
 
 ## Keybindings
@@ -78,8 +71,9 @@ ferry --version           # Show version
 | `Ctrl+d` | Page down |
 | `Ctrl+u` | Page up |
 | `Tab` | Switch active pane |
-| `/` | Search / filter in current directory |
+| `/` | Search / filter |
 | `H` | Toggle hidden files |
+| `s` | Cycle sort (name → size → date) |
 
 ### File Operations
 
@@ -88,23 +82,30 @@ ferry --version           # Show version
 | `Space` | Toggle file selection |
 | `V` | Range select |
 | `yy` | Yank (mark for copy) |
-| `dd` | Delete selected files (with confirmation) |
-| `p` | Paste (transfer yanked files to current pane) |
-| `r` | Rename |
+| `p` | Paste yanked files to current pane |
 | `m` | Move selected to current pane |
+| `dd` | Delete (with confirmation) |
+| `r` | Rename |
 | `e` | Edit file (remote editing if remote pane) |
 | `D` | Create directory |
 
-### Views and Panels
+### Views
 
 | Key | Action |
 |-----|--------|
+| `S` | Enter sync/diff view |
 | `i` | Toggle file info panel |
 | `t` | Toggle transfer queue |
-| `?` | Toggle help overlay |
-| `S` | Enter sync/diff view |
-| `Esc` | Close overlay / cancel / back |
+| `?` | Help overlay |
+| `R` | Reconnect |
+| `Esc` | Close overlay / cancel |
 | `q` / `Ctrl+c` | Quit |
+
+## How It Works
+
+Ferry connects over SSH/SFTP using your existing `~/.ssh/config`. Files transfer through a concurrent engine with progress tracking. For directory sync, it compares file trees by size and modification time, then lets you selectively push or pull changes — or use rsync for the whole thing.
+
+Interrupted transfers are resumable: completed files are detected by matching size and mtime and skipped on retry. Failed transfers retry automatically (up to 2 times) to handle transient network issues. Writes use atomic temp files (`.ferry-tmp` → rename) so partial transfers are never mistaken for complete ones. Pasting into a directory with existing files prompts for overwrite confirmation.
 
 ## ferry vs termscp
 
@@ -114,19 +115,17 @@ ferry --version           # Show version
 | Navigation | Vim keybindings + arrows | Arrow keys only |
 | SSH config | Full support (ProxyJump, agent, includes) | Basic support |
 | Directory sync | Visual diff with selective transfer | No |
-| Remote editing | $EDITOR with conflict detection | Basic remote edit |
-| Connection picker | Fuzzy search over ~/.ssh/config | Manual entry or bookmarks |
-| Transfer engine | rsync integration for delta transfers | SCP/SFTP only |
+| Remote editing | `$EDITOR` with conflict detection | Basic remote edit |
+| Resume transfers | Yes (skip completed files, auto-retry) | No |
+| Overwrite protection | Yes (confirms before overwriting) | No |
+| rsync integration | Yes | No |
 
 ## Built With
 
-- [Go](https://go.dev)
-- [Bubble Tea](https://github.com/charmbracelet/bubbletea) -- TUI framework
-- [Lip Gloss](https://github.com/charmbracelet/lipgloss) -- Terminal styling
-- [Bubbles](https://github.com/charmbracelet/bubbles) -- TUI components
-- [golang.org/x/crypto/ssh](https://pkg.go.dev/golang.org/x/crypto/ssh) -- SSH client
-- [pkg/sftp](https://github.com/pkg/sftp) -- SFTP client
-- [sahilm/fuzzy](https://github.com/sahilm/fuzzy) -- Fuzzy matching
+- [Bubble Tea](https://github.com/charmbracelet/bubbletea) — TUI framework
+- [Lip Gloss](https://github.com/charmbracelet/lipgloss) — Terminal styling
+- [pkg/sftp](https://github.com/pkg/sftp) — SFTP client
+- [golang.org/x/crypto/ssh](https://pkg.go.dev/golang.org/x/crypto/ssh) — SSH client
 
 ## License
 
