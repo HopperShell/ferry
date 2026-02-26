@@ -1,0 +1,10 @@
+services:
+  sshd:
+    build: .
+    ports:
+      - "2222:22"
+    volumes:
+      - testdata:/testdata
+
+volumes:
+  testdata:
