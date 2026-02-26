@@ -2,9 +2,9 @@
 package transfer
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"path/filepath"
 	"sync"
@@ -338,25 +338,8 @@ func (e *Engine) runJob(j *Job) {
 		}
 	}
 
-	// Read source into a buffer through a progress reader.
-	var buf bytes.Buffer
-	pr := NewProgressReader(&buf, j.Size, j.ID, j.Name, e.progress)
-
-	// Read source file, writing to our progress-tracking buffer.
-	err := j.SrcFS.Read(j.SrcPath, &buf)
-	if err != nil {
-		e.mu.Lock()
-		j.Status = JobFailed
-		j.Err = fmt.Errorf("read source: %w", err)
-		e.mu.Unlock()
-		e.progress <- ProgressEvent{
-			JobID: j.ID,
-			Name:  j.Name,
-			Done:  true,
-			Err:   j.Err,
-		}
-		return
-	}
+	// Stream source → destination through a pipe with progress tracking.
+	pr, pw := io.Pipe()
 
 	// Ensure destination directory exists.
 	dstDir := filepath.Dir(j.DstPath)
@@ -374,14 +357,33 @@ func (e *Engine) runJob(j *Job) {
 		writePath = j.DstPath + tempSuffix
 	}
 
-	err = j.DstFS.Write(writePath, pr, perm)
+	// Read source in a goroutine, streaming into the pipe.
+	var readErr error
+	var readWg sync.WaitGroup
+	readWg.Add(1)
+	go func() {
+		defer readWg.Done()
+		readErr = j.SrcFS.Read(j.SrcPath, pw)
+		pw.CloseWithError(readErr)
+	}()
+
+	// Write from the pipe through a progress reader to the destination.
+	progReader := NewProgressReader(pr, j.Size, j.ID, j.Name, e.progress)
+	err := j.DstFS.Write(writePath, progReader, perm)
+
+	// Wait for the read side to finish.
+	readWg.Wait()
+
+	if readErr != nil && err == nil {
+		err = readErr
+	}
 	if err != nil {
 		if e.resumable {
 			_ = j.DstFS.Remove(writePath) // clean up temp file
 		}
 		e.mu.Lock()
 		j.Status = JobFailed
-		j.Err = fmt.Errorf("write dest: %w", err)
+		j.Err = fmt.Errorf("transfer: %w", err)
 		e.mu.Unlock()
 		e.progress <- ProgressEvent{
 			JobID: j.ID,
@@ -416,7 +418,7 @@ func (e *Engine) runJob(j *Job) {
 	}
 
 	// Emit final progress event.
-	pr.Finish()
+	progReader.Finish()
 
 	e.mu.Lock()
 	j.Status = JobCompleted

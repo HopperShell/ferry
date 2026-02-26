@@ -76,6 +76,12 @@ type clipboard struct {
 	cut     bool // true for move (m), false for copy (yy)
 }
 
+// pendingPaste stores context for a paste awaiting overwrite confirmation.
+type pendingPaste struct {
+	dstFS   fs.FileSystem
+	dstPath string
+}
+
 // Model is the top-level Bubble Tea model for ferry.
 type Model struct {
 	state  appState
@@ -101,10 +107,11 @@ type Model struct {
 	lastKey    string // for yy/dd detection at app level
 
 	// File operations
-	clip       *clipboard
-	engine     *transfer.Engine
-	inputMode  string // "", "rename", "mkdir", "confirm-delete"
-	inputField textinput.Model
+	clip         *clipboard
+	engine       *transfer.Engine
+	inputMode    string // "", "rename", "mkdir", "confirm-delete", "confirm-overwrite"
+	inputField   textinput.Model
+	pendingPaste *pendingPaste
 
 	// Editor
 	editSession *editor.EditSession
@@ -850,6 +857,7 @@ func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc":
 			m.inputMode = ""
+			m.pendingPaste = nil
 			m.inputField.Blur()
 			return m, nil
 
@@ -857,8 +865,9 @@ func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.submitInput()
 
 		case "n":
-			if m.inputMode == "confirm-delete" {
+			if m.inputMode == "confirm-delete" || m.inputMode == "confirm-overwrite" {
 				m.inputMode = ""
+				m.pendingPaste = nil
 				m.inputField.Blur()
 				return m, nil
 			}
@@ -868,6 +877,16 @@ func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.inputMode == "confirm-delete" {
 			if msg.String() == "y" {
 				return m.executeDelete()
+			}
+			return m, nil
+		}
+
+		if m.inputMode == "confirm-overwrite" {
+			if msg.String() == "y" {
+				pp := m.pendingPaste
+				m.pendingPaste = nil
+				m.inputMode = ""
+				return m.executePaste(pp.dstFS, pp.dstPath)
 			}
 			return m, nil
 		}
@@ -985,6 +1004,7 @@ func (m Model) doYank(cut bool) (tea.Model, tea.Cmd) {
 }
 
 // doPaste creates transfer jobs from clipboard to the current pane's directory.
+// If any destination files already exist, it prompts for overwrite confirmation.
 func (m Model) doPaste() (tea.Model, tea.Cmd) {
 	if m.clip == nil || len(m.clip.entries) == 0 {
 		m.statusBar.SetError("Nothing to paste")
@@ -1001,6 +1021,32 @@ func (m Model) doPaste() (tea.Model, tea.Cmd) {
 		dstPath = m.remotePane.Path()
 	}
 
+	// Check if any destination files already exist.
+	conflicts := 0
+	for _, entry := range m.clip.entries {
+		relPath, err := filepath.Rel(m.clip.srcPath, entry.Path)
+		if err != nil || relPath == "." {
+			relPath = entry.Name
+		}
+		if !entry.IsDir {
+			if _, err := dstFS.Stat(filepath.Join(dstPath, relPath)); err == nil {
+				conflicts++
+			}
+		}
+	}
+
+	if conflicts > 0 {
+		m.pendingPaste = &pendingPaste{dstFS: dstFS, dstPath: dstPath}
+		m.inputMode = "confirm-overwrite"
+		m.statusBar.SetError(fmt.Sprintf("Overwrite %d existing file(s)? y/n", conflicts))
+		return m, nil
+	}
+
+	return m.executePaste(dstFS, dstPath)
+}
+
+// executePaste starts the transfer engine for a paste operation.
+func (m Model) executePaste(dstFS fs.FileSystem, dstPath string) (tea.Model, tea.Cmd) {
 	m.engine = transfer.NewEngine(2, true)
 	go m.engine.Start()
 	clipEntries := m.clip.entries

@@ -5,9 +5,9 @@
 - [x] Use rsync for sync transfers when available (infrastructure exists, not wired up)
 - [x] Resume interrupted transfers
 - [ ] Retry failed transfers automatically
-- [ ] Confirm before overwriting existing files on copy/paste
+- [x] Confirm before overwriting existing files on copy/paste
 - [x] Atomic writes (write to temp file, rename on success)
-- [ ] Streaming progress for large files (currently reads full file into memory)
+- [x] Streaming progress for large files (pipe instead of buffer)
 
 ## Navigation & File Operations
 
