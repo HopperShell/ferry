@@ -26,5 +26,6 @@ type FileSystem interface {
 	Remove(path string) error
 	Rename(old, new string) error
 	Chmod(path string, perm os.FileMode) error
+	Chtimes(path string, mtime time.Time) error
 	HomeDir() (string, error)
 }

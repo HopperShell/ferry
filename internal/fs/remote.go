@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -132,6 +133,13 @@ func (r *RemoteFS) Chmod(path string, perm os.FileMode) error {
 		return errNoClient
 	}
 	return r.client.Chmod(path, perm)
+}
+
+func (r *RemoteFS) Chtimes(path string, mtime time.Time) error {
+	if r.client == nil {
+		return errNoClient
+	}
+	return r.client.Chtimes(path, mtime, mtime)
 }
 
 func (r *RemoteFS) HomeDir() (string, error) {
