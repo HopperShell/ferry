@@ -30,6 +30,33 @@ type errMsg struct {
 	err   error
 }
 
+// TransferRequestMsg is emitted when the user presses Enter on a file (or with
+// files selected). The parent model handles this by transferring the entries to
+// the other pane.
+type TransferRequestMsg struct {
+	Entries []fs.Entry
+}
+
+// SortMode determines how entries are sorted within the pane.
+type SortMode int
+
+const (
+	SortByName SortMode = iota
+	SortBySize
+	SortByDate
+)
+
+func (s SortMode) String() string {
+	switch s {
+	case SortBySize:
+		return "size"
+	case SortByDate:
+		return "date"
+	default:
+		return "name"
+	}
+}
+
 // Model is a file browser pane component. It is NOT an independent Bubble Tea
 // program; its Update and View methods are called by the parent.
 type Model struct {
@@ -48,9 +75,10 @@ type Model struct {
 	width       int
 	height      int
 	err         error
-	anchor      int    // for range select (V)
-	lastKey     string // for gg detection
-	active      bool   // whether this pane is the focused pane
+	anchor      int      // for range select (V)
+	lastKey     string   // for gg detection
+	active      bool     // whether this pane is the focused pane
+	sortMode    SortMode // current sort order
 }
 
 // New creates a new pane backed by the given filesystem.
@@ -152,7 +180,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil // not for this pane
 		}
 		m.path = msg.path
-		m.entries = sortEntries(msg.entries)
+		m.entries = sortEntries(msg.entries, m.sortMode)
 		m.loaded = true
 		m.cursor = 0
 		m.offset = 0
@@ -267,11 +295,27 @@ func (m Model) updateNormal(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.ensureVisible()
 
 	case "l", "right", "enter":
+		// Enter with explicit selections: transfer everything selected.
+		if key == "enter" && len(m.selected) > 0 {
+			entries := m.SelectedEntries()
+			return m, func() tea.Msg {
+				return TransferRequestMsg{Entries: entries}
+			}
+		}
+		// Navigate into directory.
 		if e := m.CurrentEntry(); e != nil && e.IsDir {
 			target := e.Path
 			m.selected = make(map[string]bool)
 			m.anchor = -1
 			return m, m.listDir(target)
+		}
+		// Enter on a single file (no selections): transfer it.
+		if key == "enter" {
+			if e := m.CurrentEntry(); e != nil {
+				return m, func() tea.Msg {
+					return TransferRequestMsg{Entries: []fs.Entry{*e}}
+				}
+			}
 		}
 
 	case "h", "left", "backspace":
@@ -317,6 +361,12 @@ func (m Model) updateNormal(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.cursor = 0
 		m.offset = 0
 		m.applyFilters()
+
+	case "s":
+		m.sortMode = (m.sortMode + 1) % 3
+		m.entries = sortEntries(m.entries, m.sortMode)
+		m.applyFilters()
+		m.clampCursor()
 
 	case "/":
 		m.search = true
@@ -378,7 +428,16 @@ func (m Model) View() string {
 		selCount := len(m.selected)
 		info := fmt.Sprintf(" %d items", visCount)
 		if selCount > 0 {
-			info += fmt.Sprintf(" | %d selected", selCount)
+			var totalSize int64
+			for _, e := range m.entries {
+				if m.selected[e.Path] && !e.IsDir {
+					totalSize += e.Size
+				}
+			}
+			info += fmt.Sprintf(" | %d selected (%s)", selCount, formatSize(totalSize))
+		}
+		if m.sortMode != SortByName {
+			info += fmt.Sprintf(" | sort: %s", m.sortMode)
 		}
 		footer = lipgloss.NewStyle().Foreground(theme.Dim).Render(info)
 	}
@@ -413,13 +472,20 @@ func (m Model) listDir(path string) tea.Cmd {
 	}
 }
 
-func sortEntries(entries []fs.Entry) []fs.Entry {
+func sortEntries(entries []fs.Entry, mode SortMode) []fs.Entry {
 	sort.SliceStable(entries, func(i, j int) bool {
-		// Directories first.
+		// Directories first, always.
 		if entries[i].IsDir != entries[j].IsDir {
 			return entries[i].IsDir
 		}
-		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+		switch mode {
+		case SortBySize:
+			return entries[i].Size > entries[j].Size
+		case SortByDate:
+			return entries[i].ModTime.After(entries[j].ModTime)
+		default:
+			return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+		}
 	})
 	return entries
 }
