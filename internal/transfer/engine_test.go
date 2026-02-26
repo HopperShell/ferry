@@ -1,15 +1,33 @@
 package transfer_test
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/andrewstuart/ferry/internal/fs"
 	"github.com/andrewstuart/ferry/internal/transfer"
 )
+
+// failingWriteFS wraps a FileSystem and fails on Write the first N times.
+type failingWriteFS struct {
+	fs.FileSystem
+	failCount atomic.Int32
+}
+
+func (f *failingWriteFS) Write(path string, r io.Reader, perm os.FileMode) error {
+	if f.failCount.Add(-1) >= 0 {
+		// Drain the reader so the pipe writer doesn't block.
+		io.Copy(io.Discard, r)
+		return errors.New("simulated write failure")
+	}
+	return f.FileSystem.Write(path, r, perm)
+}
 
 // collectDoneEvents drains the progress channel and returns the first
 // Done event per unique JobID (ignoring duplicate done events from
@@ -287,6 +305,99 @@ func TestNoTempFilesAfterSuccess(t *testing.T) {
 	}
 	if len(dstEntries) != 3 {
 		t.Errorf("expected 3 files, got %d", len(dstEntries))
+	}
+}
+
+// TestRetryFailedTransfers verifies that a failed transfer is retried
+// and succeeds when the underlying error is transient.
+func TestRetryFailedTransfers(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	data := []byte("retry me")
+	srcPath := filepath.Join(srcDir, "retry.txt")
+	os.WriteFile(srcPath, data, 0o644)
+
+	srcFS := fs.NewLocalFS()
+	dstFS := &failingWriteFS{FileSystem: fs.NewLocalFS()}
+	// Fail on first write attempt, succeed on retry.
+	dstFS.failCount.Store(1)
+
+	engine := transfer.NewEngine(1, true)
+	engine.SetRetryDelay(time.Millisecond) // fast retries for test
+	go engine.Start()
+
+	engine.Enqueue(&transfer.Job{
+		Name:    "retry.txt",
+		SrcPath: srcPath,
+		SrcFS:   srcFS,
+		DstPath: filepath.Join(dstDir, "retry.txt"),
+		DstFS:   dstFS,
+		Size:    int64(len(data)),
+	})
+	engine.Done()
+
+	results := collectDoneEvents(engine.Progress())
+	if len(results) != 1 {
+		t.Fatalf("expected 1 job result, got %d", len(results))
+	}
+	for _, evt := range results {
+		if evt.Err != nil {
+			t.Errorf("expected successful retry, got error: %v", evt.Err)
+		}
+	}
+
+	// Verify file content at destination.
+	got, err := os.ReadFile(filepath.Join(dstDir, "retry.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("file content mismatch: got %q, want %q", got, data)
+	}
+}
+
+// TestRetryExhausted verifies that a job fails permanently after all retries.
+func TestRetryExhausted(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	data := []byte("fail forever")
+	srcPath := filepath.Join(srcDir, "fail.txt")
+	os.WriteFile(srcPath, data, 0o644)
+
+	srcFS := fs.NewLocalFS()
+	dstFS := &failingWriteFS{FileSystem: fs.NewLocalFS()}
+	// Fail more times than maxRetries (2) + initial attempt = 3 total.
+	dstFS.failCount.Store(10)
+
+	engine := transfer.NewEngine(1, true)
+	engine.SetRetryDelay(time.Millisecond)
+	go engine.Start()
+
+	engine.Enqueue(&transfer.Job{
+		Name:    "fail.txt",
+		SrcPath: srcPath,
+		SrcFS:   srcFS,
+		DstPath: filepath.Join(dstDir, "fail.txt"),
+		DstFS:   dstFS,
+		Size:    int64(len(data)),
+	})
+	engine.Done()
+
+	results := collectDoneEvents(engine.Progress())
+	if len(results) != 1 {
+		t.Fatalf("expected 1 job result, got %d", len(results))
+	}
+	for _, evt := range results {
+		if evt.Err == nil {
+			t.Error("expected error after exhausting retries, got nil")
+		}
+	}
+
+	// File should not exist at destination.
+	if _, err := os.Stat(filepath.Join(dstDir, "fail.txt")); err == nil {
+		t.Error("file should not exist after all retries exhausted")
 	}
 }
 

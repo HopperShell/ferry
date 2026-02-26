@@ -4,7 +4,7 @@
 
 - [x] Use rsync for sync transfers when available (infrastructure exists, not wired up)
 - [x] Resume interrupted transfers
-- [ ] Retry failed transfers automatically
+- [x] Retry failed transfers automatically
 - [x] Confirm before overwriting existing files on copy/paste
 - [x] Atomic writes (write to temp file, rename on success)
 - [x] Streaming progress for large files (pipe instead of buffer)

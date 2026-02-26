@@ -13,7 +13,11 @@ import (
 	"github.com/andrewstuart/ferry/internal/fs"
 )
 
-const tempSuffix = ".ferry-tmp"
+const (
+	tempSuffix     = ".ferry-tmp"
+	maxRetries     = 2
+	defaultRetryDelay = 500 * time.Millisecond
+)
 
 // JobStatus represents the state of a transfer job.
 type JobStatus int
@@ -36,6 +40,7 @@ type Job struct {
 	Size    int64
 	Status  JobStatus
 	Err     error
+	retries int // number of retries attempted so far
 }
 
 // ProgressEvent reports progress on a single transfer job.
@@ -55,6 +60,7 @@ type Engine struct {
 	progress    chan ProgressEvent
 	maxWorkers  int
 	resumable   bool
+	retryDelay  time.Duration
 	mu          sync.Mutex
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -74,9 +80,15 @@ func NewEngine(maxWorkers int, resumable bool) *Engine {
 		progress:   make(chan ProgressEvent, 64),
 		maxWorkers: maxWorkers,
 		resumable:  resumable,
+		retryDelay: defaultRetryDelay,
 		ctx:        ctx,
 		cancel:     cancel,
 	}
+}
+
+// SetRetryDelay overrides the delay between retries (useful for testing).
+func (e *Engine) SetRetryDelay(d time.Duration) {
+	e.retryDelay = d
 }
 
 // Enqueue adds a job to the queue.
@@ -300,6 +312,31 @@ func (e *Engine) pendingJobs() []*Job {
 	return out
 }
 
+// failJob marks a job as failed, or requeues it for retry if retries remain.
+// Returns true if the job will be retried.
+func (e *Engine) failJob(j *Job, err error) bool {
+	if j.retries < maxRetries {
+		j.retries++
+		e.mu.Lock()
+		j.Status = JobPending
+		j.Err = nil
+		e.mu.Unlock()
+		time.Sleep(e.retryDelay)
+		return true
+	}
+	e.mu.Lock()
+	j.Status = JobFailed
+	j.Err = err
+	e.mu.Unlock()
+	e.progress <- ProgressEvent{
+		JobID: j.ID,
+		Name:  j.Name,
+		Done:  true,
+		Err:   err,
+	}
+	return false
+}
+
 func (e *Engine) runJob(j *Job) {
 	e.mu.Lock()
 	j.Status = JobActive
@@ -381,16 +418,7 @@ func (e *Engine) runJob(j *Job) {
 		if e.resumable {
 			_ = j.DstFS.Remove(writePath) // clean up temp file
 		}
-		e.mu.Lock()
-		j.Status = JobFailed
-		j.Err = fmt.Errorf("transfer: %w", err)
-		e.mu.Unlock()
-		e.progress <- ProgressEvent{
-			JobID: j.ID,
-			Name:  j.Name,
-			Done:  true,
-			Err:   j.Err,
-		}
+		e.failJob(j, fmt.Errorf("transfer: %w", err))
 		return
 	}
 
@@ -398,16 +426,7 @@ func (e *Engine) runJob(j *Job) {
 	if e.resumable {
 		if err := j.DstFS.Rename(writePath, j.DstPath); err != nil {
 			_ = j.DstFS.Remove(writePath)
-			e.mu.Lock()
-			j.Status = JobFailed
-			j.Err = fmt.Errorf("rename temp: %w", err)
-			e.mu.Unlock()
-			e.progress <- ProgressEvent{
-				JobID: j.ID,
-				Name:  j.Name,
-				Done:  true,
-				Err:   j.Err,
-			}
+			e.failJob(j, fmt.Errorf("rename temp: %w", err))
 			return
 		}
 	}

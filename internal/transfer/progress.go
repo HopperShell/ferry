@@ -78,9 +78,9 @@ func (pr *ProgressReader) Read(p []byte) (int, error) {
 		}
 	}
 
-	if err == io.EOF {
-		pr.emit(time.Now(), true)
-	}
+	// Don't emit a done event on EOF — the caller should use Finish()
+	// to signal completion. This avoids spurious "done" events when the
+	// reader is drained on a failed transfer.
 
 	return n, err
 }
