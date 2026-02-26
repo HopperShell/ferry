@@ -9,6 +9,23 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+var (
+	keyStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(theme.Navy).
+			Background(theme.Cyan)
+
+	labelStyle = lipgloss.NewStyle().
+			Foreground(theme.White).
+			Background(theme.Navy)
+)
+
+// hint is a single keybinding hint for the bottom bar.
+type hint struct {
+	key   string
+	label string
+}
+
 // StatusBar is a simple renderer for the bottom status line.
 // It is NOT a tea.Model — just a view component.
 type StatusBar struct {
@@ -38,14 +55,26 @@ func (s *StatusBar) SetWidth(width int) {
 	s.width = width
 }
 
-// View renders the status bar as a single line.
+// Height returns the number of rows the status bar occupies.
+func (s *StatusBar) Height() int {
+	return 2
+}
+
+// View renders the status bar as two lines: info line + keybinding hints.
 func (s *StatusBar) View() string {
 	width := s.width
 	if width < 20 {
 		width = 20
 	}
 
-	// If there's an error, show it in red across the full bar.
+	infoLine := s.renderInfoLine(width)
+	hintLine := s.renderHintLine(width)
+
+	return lipgloss.JoinVertical(lipgloss.Left, infoLine, hintLine)
+}
+
+func (s *StatusBar) renderInfoLine(width int) string {
+	// If there's an error/message, show it across the full bar.
 	if s.error != "" {
 		errText := theme.ErrorStyle.Render(" " + s.error + " ")
 		pad := width - lipgloss.Width(errText)
@@ -63,32 +92,50 @@ func (s *StatusBar) View() string {
 	}
 	leftStyled := lipgloss.NewStyle().Foreground(theme.Cyan).Render(left)
 
-	// Middle: selection count.
-	var middle string
+	// Right: selection count.
+	var right string
 	if s.selection > 0 {
-		middle = fmt.Sprintf("%d files selected", s.selection)
+		right = fmt.Sprintf("%d files selected", s.selection)
 	}
-	middleStyled := lipgloss.NewStyle().Foreground(theme.Amber).Render(middle)
+	rightStyled := lipgloss.NewStyle().Foreground(theme.Amber).Render(right)
 
-	// Right: keybinding hints.
-	right := "Tab:switch  ?:help  q:quit"
-	rightStyled := lipgloss.NewStyle().Foreground(theme.Dim).Render(right)
-
-	// Calculate spacing.
-	leftW := lipgloss.Width(leftStyled)
-	midW := lipgloss.Width(middleStyled)
-	rightW := lipgloss.Width(rightStyled)
-	usedWidth := leftW + midW + rightW
-
-	// Distribute remaining space as gaps.
-	remaining := width - usedWidth - 2 // -2 for padding
-	if remaining < 2 {
-		remaining = 2
+	gap := width - lipgloss.Width(leftStyled) - lipgloss.Width(rightStyled) - 2
+	if gap < 1 {
+		gap = 1
 	}
-	gap1 := remaining / 2
-	gap2 := remaining - gap1
 
-	line := leftStyled + strings.Repeat(" ", gap1) + middleStyled + strings.Repeat(" ", gap2) + rightStyled
-
+	line := leftStyled + strings.Repeat(" ", gap) + rightStyled
 	return theme.StatusBar.Width(width).Render(line)
+}
+
+func (s *StatusBar) renderHintLine(width int) string {
+	hints := []hint{
+		{"Enter", "Transfer"},
+		{"Tab", "Switch"},
+		{"Space", "Select"},
+		{"yy", "Copy"},
+		{"p", "Paste"},
+		{"dd", "Delete"},
+		{"r", "Rename"},
+		{"D", "Mkdir"},
+		{"e", "Edit"},
+		{"S", "Sync"},
+		{"?", "Help"},
+		{"q", "Quit"},
+	}
+
+	var parts []string
+	for _, h := range hints {
+		parts = append(parts, keyStyle.Render(" "+h.key+" ")+labelStyle.Render(h.label))
+	}
+
+	line := strings.Join(parts, " ")
+
+	// Pad to fill the full width.
+	lineW := lipgloss.Width(line)
+	if lineW < width {
+		line += labelStyle.Render(strings.Repeat(" ", width-lineW))
+	}
+
+	return line
 }

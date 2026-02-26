@@ -64,10 +64,10 @@ func (o *Overlay) View() string {
 		return ""
 	}
 
-	const maxNameLen = 20
+	const maxNameLen = 36
 	const barWidth = 16
 	// Determine box inner width.
-	innerWidth := 52
+	innerWidth := 68
 	if o.width > 0 && o.width < innerWidth+4 {
 		innerWidth = o.width - 4
 	}
