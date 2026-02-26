@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="400" height="300">
+  <!-- Concept 3: Two shores with a minimal ferry crossing — the shore shapes suggest folder/terminal icons -->
+  <defs>
+    <linearGradient id="shore-l" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#334155"/>
+    </linearGradient>
+    <linearGradient id="shore-r" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#334155"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="water3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0ea5e9" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#0ea5e9" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="hull3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#e2e8f0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Water channel -->
+  <rect x="115" y="55" width="170" height="155" rx="8" fill="url(#water3)"/>
+
+  <!-- Left shore (shaped like a terminal/folder tab) -->
+  <path d="M0 50 L80 50 Q90 50 95 60 L110 90 Q115 100 115 110 L115 210 Q115 218 107 218 L0 218 Z" fill="url(#shore-l)"/>
+
+  <!-- Terminal prompt on left shore -->
+  <text x="30" y="120" font-family="monospace" font-size="14" fill="#94a3b8" opacity="0.6">&gt;_</text>
+  <!-- File lines on left shore -->
+  <rect x="25" y="135" width="50" height="3" rx="1.5" fill="#475569"/>
+  <rect x="25" y="145" width="40" height="3" rx="1.5" fill="#475569"/>
+  <rect x="25" y="155" width="55" height="3" rx="1.5" fill="#475569"/>
+  <rect x="25" y="165" width="35" height="3" rx="1.5" fill="#475569"/>
+
+  <!-- Right shore (shaped like a cloud/server) -->
+  <path d="M400 50 L320 50 Q310 50 305 60 L290 90 Q285 100 285 110 L285 210 Q285 218 293 218 L400 218 Z" fill="url(#shore-r)"/>
+
+  <!-- Server icon on right shore -->
+  <rect x="315" y="110" width="50" height="14" rx="3" fill="#475569"/>
+  <circle cx="355" cy="117" r="3" fill="#0ea5e9" opacity="0.7"/>
+  <rect x="320" y="115" width="20" height="2" rx="1" fill="#64748b"/>
+
+  <rect x="315" y="130" width="50" height="14" rx="3" fill="#475569"/>
+  <circle cx="355" cy="137" r="3" fill="#22c55e" opacity="0.7"/>
+  <rect x="320" y="135" width="20" height="2" rx="1" fill="#64748b"/>
+
+  <rect x="315" y="150" width="50" height="14" rx="3" fill="#475569"/>
+  <circle cx="355" cy="157" r="3" fill="#475569" opacity="0.5"/>
+  <rect x="320" y="155" width="20" height="2" rx="1" fill="#64748b"/>
+
+  <!-- Ferry in the channel -->
+  <g transform="translate(170, 115)">
+    <!-- Hull -->
+    <path d="M0 28 L5 8 Q8 0 15 0 L45 0 Q52 0 55 8 L60 28 Q30 34 0 28 Z" fill="url(#hull3)" stroke="#94a3b8" stroke-width="1"/>
+
+    <!-- File being carried -->
+    <g transform="translate(18, -22)">
+      <path d="M0 3 L0 22 Q0 24 2 24 L18 24 Q20 24 20 22 L20 8 L15 3 Z" fill="#0ea5e9" opacity="0.9"/>
+      <path d="M15 3 L15 8 L20 8" fill="#0284c7" opacity="0.7"/>
+    </g>
+
+    <!-- Arrow showing direction -->
+    <polygon points="65,14 75,18 65,22" fill="#0ea5e9" opacity="0.6"/>
+    <polygon points="78,14 88,18 78,22" fill="#0ea5e9" opacity="0.35"/>
+  </g>
+
+  <!-- Subtle wave lines in channel -->
+  <path d="M130 160 Q160 155 190 160 Q220 165 250 160 Q265 157 275 160" stroke="#0ea5e9" stroke-width="1" fill="none" opacity="0.2"/>
+  <path d="M125 180 Q155 175 185 180 Q215 185 245 180 Q260 177 280 180" stroke="#0ea5e9" stroke-width="1" fill="none" opacity="0.15"/>
+
+  <!-- Text -->
+  <text x="200" y="260" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="36" font-weight="700" fill="#0f172a" letter-spacing="-1">ferry</text>
+</svg>
