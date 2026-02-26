@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 type LocalFS struct{}
@@ -71,6 +72,10 @@ func (l *LocalFS) Rename(old, new string) error {
 
 func (l *LocalFS) Chmod(path string, perm os.FileMode) error {
 	return os.Chmod(path, perm)
+}
+
+func (l *LocalFS) Chtimes(path string, mtime time.Time) error {
+	return os.Chtimes(path, mtime, mtime)
 }
 
 func (l *LocalFS) HomeDir() (string, error) {

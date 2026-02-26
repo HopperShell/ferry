@@ -1,2 +1,6 @@
 # Binary
 /ferry
+
+# Test SSH keys
+test/docker/testkey
+test/docker/testkey.pub

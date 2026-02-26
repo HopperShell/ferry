@@ -23,10 +23,23 @@ type ResolvedConfig struct {
 }
 
 func Resolve(host string) (*ResolvedConfig, error) {
-	cmd := exec.Command("ssh", "-G", host)
+	// Parse user@host:port format into separate ssh -G arguments.
+	// ssh -G doesn't understand colon-delimited ports.
+	var args []string
+	sshHost := host
+	if at := strings.Index(host, "@"); at >= 0 {
+		args = append(args, "-l", host[:at])
+		sshHost = host[at+1:]
+	}
+	if h, p, err := net.SplitHostPort(sshHost); err == nil {
+		args = append(args, "-p", p)
+		sshHost = h
+	}
+	args = append(args, "-G", sshHost)
+	cmd := exec.Command("ssh", args...)
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("ssh -G %s: %w", host, err)
+		return nil, fmt.Errorf("ssh %s: %w", strings.Join(args, " "), err)
 	}
 
 	cfg := &ResolvedConfig{Port: "22"}
