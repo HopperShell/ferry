@@ -3,6 +3,7 @@ package transfer
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os/exec"
 	"path"
@@ -34,17 +35,30 @@ type DiffEntry struct {
 	NewerSide   string     // "local" or "remote" for modified entries
 }
 
+const (
+	// maxWalkDepth limits how deep the recursive directory walk goes.
+	maxWalkDepth = 10
+	// maxWalkFiles limits total files enumerated per side to keep compare fast.
+	maxWalkFiles = 5000
+	// compareTimeout is the max time Compare will spend walking.
+	compareTimeout = 10 * time.Second
+)
+
 // Compare walks both FileSystems from the given root paths and returns a flat
 // list of DiffEntries representing the unified view.
 func Compare(localFS fs.FileSystem, localRoot string, remoteFS fs.FileSystem, remoteRoot string) ([]DiffEntry, error) {
-	localMap, err := walkFS(localFS, localRoot, "")
+	ctx, cancel := context.WithTimeout(context.Background(), compareTimeout)
+	defer cancel()
+
+	// Treat non-existent directories as empty so sync can create them.
+	localMap, err := walkFS(ctx, localFS, localRoot, "", 0)
 	if err != nil {
-		return nil, fmt.Errorf("walk local: %w", err)
+		localMap = make(map[string]fs.Entry)
 	}
 
-	remoteMap, err := walkFS(remoteFS, remoteRoot, "")
+	remoteMap, err := walkFS(ctx, remoteFS, remoteRoot, "", 0)
 	if err != nil {
-		return nil, fmt.Errorf("walk remote: %w", err)
+		remoteMap = make(map[string]fs.Entry)
 	}
 
 	// Collect all unique relative paths.
@@ -83,7 +97,6 @@ func Compare(localFS fs.FileSystem, localRoot string, remoteFS fs.FileSystem, re
 			de.IsDir = local.IsDir || remote.IsDir
 
 			if local.IsDir && remote.IsDir {
-				// Directories are considered the same.
 				de.Status = DiffSame
 			} else if entriesMatch(local, remote) {
 				de.Status = DiffSame
@@ -125,32 +138,41 @@ func entriesMatch(a, b fs.Entry) bool {
 }
 
 // walkFS recursively lists a filesystem tree, building a map from relative
-// path to Entry.
-func walkFS(filesystem fs.FileSystem, root string, prefix string) (map[string]fs.Entry, error) {
+// path to Entry. Respects context cancellation, depth limit, and file cap.
+func walkFS(ctx context.Context, filesystem fs.FileSystem, root string, prefix string, depth int) (map[string]fs.Entry, error) {
 	result := make(map[string]fs.Entry)
+	return result, walkFSInto(ctx, filesystem, root, prefix, depth, result)
+}
+
+func walkFSInto(ctx context.Context, filesystem fs.FileSystem, root string, prefix string, depth int, result map[string]fs.Entry) error {
+	select {
+	case <-ctx.Done():
+		return nil // stop walking, return what we have
+	default:
+	}
 
 	entries, err := filesystem.List(root)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	for _, entry := range entries {
+		if len(result) >= maxWalkFiles {
+			return nil // cap reached
+		}
+
 		rel := path.Join(prefix, entry.Name)
 		result[rel] = entry
 
-		if entry.IsDir {
-			subMap, err := walkFS(filesystem, entry.Path, rel)
-			if err != nil {
+		if entry.IsDir && depth < maxWalkDepth {
+			if err := walkFSInto(ctx, filesystem, entry.Path, rel, depth+1, result); err != nil {
 				// Skip directories we can't read; don't fail entirely.
 				continue
-			}
-			for k, v := range subMap {
-				result[k] = v
 			}
 		}
 	}
 
-	return result, nil
+	return nil
 }
 
 // HasRsync checks if rsync is available on the remote host via SSH.

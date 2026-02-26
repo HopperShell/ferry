@@ -29,15 +29,34 @@ type SyncAction struct {
 	Direction string // "push" or "pull"
 }
 
+// SyncProgressMsg updates the transfer progress counter in the diff view.
+type SyncProgressMsg struct {
+	Done  int
+	Total int
+	Name  string // item just completed
+}
+
+// SyncRefreshMsg carries refreshed entries after all sync transfers complete.
+type SyncRefreshMsg struct {
+	Entries  []transfer.DiffEntry
+	HasRsync bool
+	Err      error
+}
+
 // Model is the Bubble Tea model for the sync/diff view.
 type Model struct {
-	entries  []transfer.DiffEntry
-	cursor   int
-	offset   int
-	selected map[int]bool
-	width    int
-	height   int
-	hasRsync bool
+	entries    []transfer.DiffEntry // all entries (including same)
+	cursor     int
+	offset     int
+	selected   map[int]bool
+	width      int
+	height     int
+	hasRsync   bool
+	scope      string // what path is being compared (shown in title)
+	syncing     bool   // true while a transfer is in progress
+	syncStatus  string // status message during sync
+	syncDone    int    // completed items
+	syncTotal   int    // total items to transfer
 }
 
 // New creates a new empty diff view model.
@@ -49,11 +68,49 @@ func New() Model {
 
 // SetEntries replaces the diff entries and resets navigation.
 func (m *Model) SetEntries(entries []transfer.DiffEntry, hasRsync bool) {
-	m.entries = entries
 	m.hasRsync = hasRsync
 	m.cursor = 0
 	m.offset = 0
 	m.selected = make(map[int]bool)
+	m.entries = entries
+	m.syncing = false
+	m.syncStatus = ""
+}
+
+// SetSyncing marks the view as busy transferring.
+func (m *Model) SetSyncing(status string) {
+	m.syncing = true
+	m.syncStatus = status
+	m.selected = make(map[int]bool)
+}
+
+// SetSyncProgress updates the progress counter.
+func (m *Model) SetSyncProgress(done, total int, name string) {
+	m.syncing = true
+	m.syncDone = done
+	m.syncTotal = total
+	m.syncStatus = name
+}
+
+// HasRsync returns whether the remote has rsync available.
+func (m *Model) HasRsync() bool {
+	return m.hasRsync
+}
+
+// DiffCount returns the number of non-same entries.
+func (m *Model) DiffCount() int {
+	n := 0
+	for _, e := range m.entries {
+		if e.Status != transfer.DiffSame {
+			n++
+		}
+	}
+	return n
+}
+
+// SetScope sets the path label shown in the title (e.g. "anotherdir2/").
+func (m *Model) SetScope(scope string) {
+	m.scope = scope
 }
 
 // SetSize updates the available terminal size.
@@ -77,13 +134,40 @@ func (m *Model) SelectedEntries() []transfer.DiffEntry {
 	return out
 }
 
+// diffEntries returns only entries that differ.
+func (m Model) diffEntries() []transfer.DiffEntry {
+	var out []transfer.DiffEntry
+	for _, e := range m.entries {
+		if e.Status != transfer.DiffSame {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// sameCount returns how many entries are in sync.
+func (m Model) sameCount() int {
+	n := 0
+	for _, e := range m.entries {
+		if e.Status == transfer.DiffSame {
+			n++
+		}
+	}
+	return n
+}
+
 // Update handles keyboard input for the diff view.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	if m.syncing {
+		return m, nil // ignore input while syncing
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		visible := m.diffEntries()
 		switch msg.String() {
 		case "j", "down":
-			if m.cursor < len(m.entries)-1 {
+			if m.cursor < len(visible)-1 {
 				m.cursor++
 				m.ensureVisible()
 			}
@@ -95,8 +179,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 		case " ":
-			// Toggle selection on current entry.
-			if m.cursor >= 0 && m.cursor < len(m.entries) {
+			if m.cursor >= 0 && m.cursor < len(visible) {
 				if m.selected[m.cursor] {
 					delete(m.selected, m.cursor)
 				} else {
@@ -105,17 +188,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 		case "a":
-			// Select all non-same entries.
 			m.selected = make(map[int]bool)
-			for i, e := range m.entries {
-				if e.Status != transfer.DiffSame {
-					m.selected[i] = true
-				}
+			for i := range visible {
+				m.selected[i] = true
 			}
 
 		case "right", "l":
-			// Push selected to remote.
-			sel := m.SelectedEntries()
+			sel := m.selectedFromVisible(visible)
 			if len(sel) > 0 {
 				return m, func() tea.Msg {
 					return SyncAction{Entries: sel, Direction: "push"}
@@ -123,8 +202,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 		case "left", "h":
-			// Pull selected to local.
-			sel := m.SelectedEntries()
+			sel := m.selectedFromVisible(visible)
 			if len(sel) > 0 {
 				return m, func() tea.Msg {
 					return SyncAction{Entries: sel, Direction: "pull"}
@@ -134,6 +212,20 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// selectedFromVisible returns the diff entries selected by index in the visible (non-same) list.
+func (m *Model) selectedFromVisible(visible []transfer.DiffEntry) []transfer.DiffEntry {
+	var out []transfer.DiffEntry
+	for idx := range m.selected {
+		if idx >= 0 && idx < len(visible) {
+			out = append(out, visible[idx])
+		}
+	}
+	if len(out) == 0 && m.cursor >= 0 && m.cursor < len(visible) {
+		out = append(out, visible[m.cursor])
+	}
+	return out
 }
 
 // ensureVisible adjusts the scroll offset so the cursor is within the viewport.
@@ -150,10 +242,9 @@ func (m *Model) ensureVisible() {
 	}
 }
 
-// viewportHeight returns how many entry rows fit on screen (reserve space for
-// header + footer).
+// viewportHeight returns how many entry rows fit on screen.
 func (m *Model) viewportHeight() int {
-	h := m.height - 4 // 1 title + 1 header + 1 footer + 1 border
+	h := m.height - 5
 	if h < 1 {
 		h = 1
 	}
@@ -162,9 +253,19 @@ func (m *Model) viewportHeight() int {
 
 // View renders the diff view.
 func (m Model) View() string {
-	if len(m.entries) == 0 {
+	visible := m.diffEntries()
+	same := m.sameCount()
+
+	scopeLabel := ""
+	if m.scope != "" {
+		scopeLabel = " " + m.scope
+	}
+
+	if len(visible) == 0 && !m.syncing {
+		msg := fmt.Sprintf("All %d entries in%s are in sync", len(m.entries), scopeLabel)
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-			lipgloss.NewStyle().Foreground(theme.Dim).Render("No differences found"))
+			lipgloss.NewStyle().Foreground(theme.Green).Render(msg)+"\n"+
+				lipgloss.NewStyle().Foreground(theme.Dim).Render("Esc to go back"))
 	}
 
 	var lines []string
@@ -172,36 +273,54 @@ func (m Model) View() string {
 	// Title.
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.Cyan)
 	selCount := len(m.selected)
-	diffCount := 0
-	for _, e := range m.entries {
-		if e.Status != transfer.DiffSame {
-			diffCount++
+	titleText := fmt.Sprintf(" Sync%s  %d differ, %d selected", scopeLabel, len(visible), selCount)
+	if m.syncing && m.syncTotal > 0 {
+		barWidth := 20
+		pct := float64(m.syncDone) / float64(m.syncTotal)
+		filled := int(pct * float64(barWidth))
+		if filled > barWidth {
+			filled = barWidth
 		}
+		bar := strings.Repeat("\u2588", filled) + strings.Repeat("\u2591", barWidth-filled)
+		titleText = fmt.Sprintf(" Sync%s  %s %d/%d  %s", scopeLabel, bar, m.syncDone, m.syncTotal, m.syncStatus)
+	} else if m.syncing {
+		titleText = fmt.Sprintf(" Sync%s  %s", scopeLabel, m.syncStatus)
 	}
-	title := titleStyle.Render(fmt.Sprintf(" Sync View  %d entries, %d differ, %d selected", len(m.entries), diffCount, selCount))
-	lines = append(lines, title)
+	lines = append(lines, titleStyle.Render(titleText))
 
 	// Column header.
 	headerStyle := lipgloss.NewStyle().Foreground(theme.Dim)
-	lines = append(lines, headerStyle.Render("  St  Name                                  Size       Side"))
+	lines = append(lines, headerStyle.Render("       Status        Name                              Size"))
 
 	// Entries in viewport.
 	vh := m.viewportHeight()
 	end := m.offset + vh
-	if end > len(m.entries) {
-		end = len(m.entries)
+	if end > len(visible) {
+		end = len(visible)
 	}
 
 	for i := m.offset; i < end; i++ {
-		e := m.entries[i]
+		e := visible[i]
 		line := m.renderEntry(i, e)
 		lines = append(lines, line)
 	}
 
+	// Same-count summary.
+	if same > 0 {
+		sameStyle := lipgloss.NewStyle().Foreground(theme.Dim).Italic(true)
+		lines = append(lines, sameStyle.Render(fmt.Sprintf("  (%d entries in sync, not shown)", same)))
+	}
+
 	// Footer with keybindings.
 	footerStyle := lipgloss.NewStyle().Foreground(theme.Dim)
-	footer := footerStyle.Render("  j/k:nav  Space:select  a:all  l/→:push  h/←:pull  Esc:back")
-	lines = append(lines, footer)
+	if m.syncing {
+		lines = append(lines, footerStyle.Render("  Transferring..."))
+	} else {
+		pushHint := lipgloss.NewStyle().Foreground(theme.Cyan).Render("→ push to remote")
+		pullHint := lipgloss.NewStyle().Foreground(theme.Amber).Render("← pull to local")
+		footer := footerStyle.Render("  j/k:nav  Space:select  a:select all  ") + pushHint + footerStyle.Render("  ") + pullHint + footerStyle.Render("  Esc:back")
+		lines = append(lines, footer)
+	}
 
 	content := strings.Join(lines, "\n")
 
@@ -218,30 +337,37 @@ func (m Model) View() string {
 func (m Model) renderEntry(idx int, e transfer.DiffEntry) string {
 	// Cursor / selection prefix.
 	prefix := "  "
-	if idx == m.cursor && m.selected[idx] {
-		prefix = "»*"
-	} else if idx == m.cursor {
-		prefix = "» "
-	} else if m.selected[idx] {
-		prefix = " *"
+	if !m.syncing {
+		if idx == m.cursor && m.selected[idx] {
+			prefix = "»*"
+		} else if idx == m.cursor {
+			prefix = "» "
+		} else if m.selected[idx] {
+			prefix = " *"
+		}
 	}
 
-	// Status icon.
-	var icon string
-	var iconStyle lipgloss.Style
+	// Status label.
+	var label string
+	var labelStyle lipgloss.Style
 	switch e.Status {
-	case transfer.DiffSame:
-		icon = "[=]"
-		iconStyle = lipgloss.NewStyle().Foreground(theme.Dim)
 	case transfer.DiffLocalOnly:
-		icon = "[+]"
-		iconStyle = lipgloss.NewStyle().Foreground(theme.Cyan)
+		label = "local → "
+		labelStyle = lipgloss.NewStyle().Foreground(theme.Cyan)
 	case transfer.DiffRemoteOnly:
-		icon = "[-]"
-		iconStyle = lipgloss.NewStyle().Foreground(theme.Red)
+		label = "← remote"
+		labelStyle = lipgloss.NewStyle().Foreground(theme.Amber)
 	case transfer.DiffModified:
-		icon = "[M]"
-		iconStyle = lipgloss.NewStyle().Foreground(theme.Amber)
+		if e.NewerSide == "local" {
+			label = "local ≠ "
+			labelStyle = lipgloss.NewStyle().Foreground(theme.Cyan)
+		} else {
+			label = " ≠ remote"
+			labelStyle = lipgloss.NewStyle().Foreground(theme.Amber)
+		}
+	default:
+		label = "  same  "
+		labelStyle = lipgloss.NewStyle().Foreground(theme.Dim)
 	}
 
 	// Name (with directory indicator).
@@ -249,7 +375,7 @@ func (m Model) renderEntry(idx int, e transfer.DiffEntry) string {
 	if e.IsDir {
 		name += "/"
 	}
-	maxNameLen := 38
+	maxNameLen := 34
 	if len(name) > maxNameLen {
 		name = name[:maxNameLen-1] + "~"
 	}
@@ -263,20 +389,10 @@ func (m Model) renderEntry(idx int, e transfer.DiffEntry) string {
 		sizeStr = fmt.Sprintf("%9s", formatSize(e.RemoteEntry.Size))
 	}
 
-	// Side info for modified entries.
-	sideStr := "      "
-	if e.Status == transfer.DiffModified && e.NewerSide != "" {
-		if e.NewerSide == "local" {
-			sideStr = lipgloss.NewStyle().Foreground(theme.Cyan).Render("local ")
-		} else {
-			sideStr = lipgloss.NewStyle().Foreground(theme.Amber).Render("remote")
-		}
-	}
-
-	line := fmt.Sprintf("%s %s %s %s %s", prefix, iconStyle.Render(icon), name, sizeStr, sideStr)
+	line := fmt.Sprintf("%s %s %s %s", prefix, labelStyle.Render(label), name, sizeStr)
 
 	// Highlight cursor row.
-	if idx == m.cursor {
+	if !m.syncing && idx == m.cursor {
 		line = lipgloss.NewStyle().
 			Background(lipgloss.Color("#2A3A5A")).
 			Foreground(theme.White).
