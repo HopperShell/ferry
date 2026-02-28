@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
@@ -56,7 +57,15 @@ func listBucketsForProfile(ctx context.Context, profile string) ([]BucketEntry, 
 		return nil, nil
 	}
 
-	client := s3.NewFromConfig(cfg)
+	var s3Opts []func(*s3.Options)
+	if endpoint := os.Getenv("AWS_ENDPOINT_URL"); endpoint != "" {
+		s3Opts = append(s3Opts, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(endpoint)
+			o.UsePathStyle = true
+		})
+	}
+
+	client := s3.NewFromConfig(cfg, s3Opts...)
 	result, err := client.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
 		return nil, nil

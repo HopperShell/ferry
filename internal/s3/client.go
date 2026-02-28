@@ -4,6 +4,7 @@ package s3util
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -48,7 +49,19 @@ func Connect(ctx context.Context, bucket, region, profile string) (*ConnectResul
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
 
-	client := s3.NewFromConfig(cfg)
+	// Build S3 client options.
+	var s3Opts []func(*s3.Options)
+
+	// Support custom endpoints (MinIO, R2, B2, LocalStack, etc.)
+	// via AWS_ENDPOINT_URL env var or endpoint_url in profile config.
+	if endpoint := os.Getenv("AWS_ENDPOINT_URL"); endpoint != "" {
+		s3Opts = append(s3Opts, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(endpoint)
+			o.UsePathStyle = true
+		})
+	}
+
+	client := s3.NewFromConfig(cfg, s3Opts...)
 
 	if region == "" {
 		region = cfg.Region
@@ -61,7 +74,7 @@ func Connect(ctx context.Context, bucket, region, profile string) (*ConnectResul
 		if err == nil && loc.LocationConstraint != "" {
 			region = string(loc.LocationConstraint)
 			cfg.Region = region
-			client = s3.NewFromConfig(cfg)
+			client = s3.NewFromConfig(cfg, s3Opts...)
 		}
 	}
 
