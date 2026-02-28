@@ -10,22 +10,36 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sahilm/fuzzy"
 
+	s3util "github.com/andrewstuart/ferry/internal/s3"
 	ferrySSH "github.com/andrewstuart/ferry/internal/ssh"
 	"github.com/andrewstuart/ferry/internal/ui/theme"
 )
+
+type ConnectionTarget struct {
+	Type   string // "ssh" or "s3"
+	Host   string // SSH host (for ssh type)
+	Bucket string // S3 bucket name (for s3 type)
+	Prefix string // S3 prefix (for s3 type)
+}
 
 type HostSelected struct {
 	Host string
 }
 
+type TargetSelected struct {
+	Target ConnectionTarget
+}
+
 type Model struct {
-	hosts    []ferrySSH.HostEntry
-	filtered []ferrySSH.HostEntry
-	input    textinput.Model
-	cursor   int
-	width    int
-	height   int
-	errMsg   string
+	hosts           []ferrySSH.HostEntry
+	s3Buckets       []s3util.BucketEntry
+	filtered        []ferrySSH.HostEntry
+	filteredBuckets []s3util.BucketEntry
+	input           textinput.Model
+	cursor          int
+	width           int
+	height          int
+	errMsg          string
 }
 
 // SetError sets an error message to display in the picker.
@@ -33,17 +47,28 @@ func (m *Model) SetError(msg string) {
 	m.errMsg = msg
 }
 
-func New(hosts []ferrySSH.HostEntry) Model {
+// totalItems returns the total number of selectable items (filtered hosts + filtered buckets).
+func (m Model) totalItems() int {
+	return len(m.filtered) + len(m.filteredBuckets)
+}
+
+func NewWithBuckets(hosts []ferrySSH.HostEntry, buckets []s3util.BucketEntry) Model {
 	ti := textinput.New()
 	ti.Placeholder = "Search hosts or enter user@host:port..."
 	ti.Focus()
 	ti.CharLimit = 256
 
 	return Model{
-		hosts:    hosts,
-		filtered: hosts,
-		input:    ti,
+		hosts:           hosts,
+		s3Buckets:       buckets,
+		filtered:        hosts,
+		filteredBuckets: buckets,
+		input:           ti,
 	}
+}
+
+func New(hosts []ferrySSH.HostEntry) Model {
+	return NewWithBuckets(hosts, nil)
 }
 
 func (m Model) Init() tea.Cmd {
@@ -60,18 +85,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "enter":
-			if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-				return m, selectHost(m.filtered[m.cursor].Name)
-			}
-			if m.input.Value() != "" {
-				return m, selectHost(m.input.Value())
-			}
+			return m, m.handleEnter()
 		case "up", "ctrl+k":
 			if m.cursor > 0 {
 				m.cursor--
 			}
 		case "down", "ctrl+j":
-			if m.cursor < len(m.filtered)-1 {
+			if m.cursor < m.totalItems()-1 {
 				m.cursor++
 			}
 		case "esc":
@@ -85,7 +105,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	query := m.input.Value()
 	if query == "" {
 		m.filtered = m.hosts
+		m.filteredBuckets = m.s3Buckets
 	} else {
+		// Filter SSH hosts
 		names := make([]string, len(m.hosts))
 		for i, h := range m.hosts {
 			names[i] = fmt.Sprintf("%s %s %s", h.Name, h.HostName, h.User)
@@ -95,12 +117,69 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		for i, match := range matches {
 			m.filtered[i] = m.hosts[match.Index]
 		}
+
+		// Filter S3 buckets
+		if len(m.s3Buckets) > 0 {
+			bucketNames := make([]string, len(m.s3Buckets))
+			for i, b := range m.s3Buckets {
+				bucketNames[i] = b.Name
+			}
+			bucketMatches := fuzzy.Find(query, bucketNames)
+			m.filteredBuckets = make([]s3util.BucketEntry, len(bucketMatches))
+			for i, match := range bucketMatches {
+				m.filteredBuckets[i] = m.s3Buckets[match.Index]
+			}
+		} else {
+			m.filteredBuckets = nil
+		}
 	}
-	if m.cursor >= len(m.filtered) {
-		m.cursor = max(0, len(m.filtered)-1)
+	if m.cursor >= m.totalItems() {
+		m.cursor = max(0, m.totalItems()-1)
 	}
 
 	return m, cmd
+}
+
+// handleEnter processes the enter key, returning the appropriate command.
+func (m Model) handleEnter() tea.Cmd {
+	// Check if the input is an s3:// URI
+	val := m.input.Value()
+	if strings.HasPrefix(val, "s3://") {
+		path := strings.TrimPrefix(val, "s3://")
+		bucket, prefix, _ := strings.Cut(path, "/")
+		return selectTarget(ConnectionTarget{
+			Type:   "s3",
+			Bucket: bucket,
+			Prefix: prefix,
+		})
+	}
+
+	total := m.totalItems()
+	if total > 0 && m.cursor < total {
+		// Determine if the cursor is on an SSH host or S3 bucket
+		if m.cursor < len(m.filtered) {
+			return selectTarget(ConnectionTarget{
+				Type: "ssh",
+				Host: m.filtered[m.cursor].Name,
+			})
+		}
+		bucketIdx := m.cursor - len(m.filtered)
+		if bucketIdx < len(m.filteredBuckets) {
+			return selectTarget(ConnectionTarget{
+				Type:   "s3",
+				Bucket: m.filteredBuckets[bucketIdx].Name,
+			})
+		}
+	}
+
+	// Fallback: treat raw input as SSH host
+	if val != "" {
+		return selectTarget(ConnectionTarget{
+			Type: "ssh",
+			Host: val,
+		})
+	}
+	return nil
 }
 
 func (m Model) View() string {
@@ -118,13 +197,17 @@ func (m Model) View() string {
 		maxVisible = 3
 	}
 
-	start := 0
-	if m.cursor >= maxVisible {
-		start = m.cursor - maxVisible + 1
+	// Build a unified list of display lines with their selectable index
+	type displayLine struct {
+		text       string
+		selectable bool
+		index      int // index in the combined selectable list
 	}
 
-	for i := start; i < len(m.filtered) && i < start+maxVisible; i++ {
-		h := m.filtered[i]
+	var lines []displayLine
+
+	// SSH hosts
+	for i, h := range m.filtered {
 		host := h.HostName
 		if host == "" {
 			host = h.Name
@@ -139,10 +222,44 @@ func (m Model) View() string {
 		} else {
 			port = ":" + port
 		}
+		text := fmt.Sprintf("  %s  %s@%s%s", h.Name, user, host, port)
+		lines = append(lines, displayLine{text: text, selectable: true, index: i})
+	}
 
-		line := fmt.Sprintf("  %s  %s@%s%s", h.Name, user, host, port)
+	// S3 divider and buckets
+	if len(m.filteredBuckets) > 0 {
+		divider := lipgloss.NewStyle().Foreground(theme.Dim).Render("  ── S3 Buckets ──")
+		lines = append(lines, displayLine{text: divider, selectable: false, index: -1})
 
-		if i == m.cursor {
+		for i, bucket := range m.filteredBuckets {
+			text := fmt.Sprintf("  s3://%s", bucket.Name)
+			lines = append(lines, displayLine{text: text, selectable: true, index: len(m.filtered) + i})
+		}
+	}
+
+	// Scrolling: find the display-line index of the cursor
+	cursorDisplayIdx := 0
+	for i, l := range lines {
+		if l.selectable && l.index == m.cursor {
+			cursorDisplayIdx = i
+			break
+		}
+	}
+
+	start := 0
+	if cursorDisplayIdx >= maxVisible {
+		start = cursorDisplayIdx - maxVisible + 1
+	}
+
+	for i := start; i < len(lines) && i < start+maxVisible; i++ {
+		l := lines[i]
+		if !l.selectable {
+			b.WriteString(l.text + "\n")
+			continue
+		}
+
+		line := l.text
+		if l.index == m.cursor {
 			line = theme.CursorStyle.Render("> " + line[2:])
 		} else {
 			line = lipgloss.NewStyle().Foreground(theme.White).Render(line)
@@ -159,6 +276,12 @@ func (m Model) View() string {
 	b.WriteString(footer)
 
 	return b.String()
+}
+
+func selectTarget(target ConnectionTarget) tea.Cmd {
+	return func() tea.Msg {
+		return TargetSelected{Target: target}
+	}
 }
 
 func selectHost(host string) tea.Cmd {
