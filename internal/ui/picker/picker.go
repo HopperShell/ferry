@@ -54,7 +54,7 @@ func (m Model) totalItems() int {
 
 func NewWithBuckets(hosts []ferrySSH.HostEntry, buckets []s3util.BucketEntry) Model {
 	ti := textinput.New()
-	ti.Placeholder = "Search hosts or enter user@host:port..."
+	ti.Placeholder = "Search hosts or enter user@host:port or s3://bucket..."
 	ti.Focus()
 	ti.CharLimit = 256
 
