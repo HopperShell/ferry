@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/andrewstuart/ferry/internal/app"
@@ -23,6 +24,8 @@ Usage:
   ferry <host>              Connect to SSH host
   ferry <user@host>         Connect with explicit user
   ferry <user@host:port>    Connect with explicit user and port
+  ferry s3://<bucket>       Connect to S3 bucket
+  ferry s3://<bucket>/path  Connect to S3 bucket at prefix
 
 Flags:
 `)
@@ -40,8 +43,11 @@ Flags:
 		host = flag.Arg(0)
 	}
 
-	opts := app.Options{
-		Host: host,
+	opts := app.Options{}
+	if strings.HasPrefix(host, "s3://") {
+		opts.S3URI = host
+	} else {
+		opts.Host = host
 	}
 
 	p := tea.NewProgram(app.NewWithOptions(opts), tea.WithAltScreen())

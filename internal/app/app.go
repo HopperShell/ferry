@@ -3,6 +3,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	s3svc "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/andrewstuart/ferry/internal/editor"
 	"github.com/andrewstuart/ferry/internal/fs"
+	s3util "github.com/andrewstuart/ferry/internal/s3"
 	ferrySSH "github.com/andrewstuart/ferry/internal/ssh"
 	"github.com/andrewstuart/ferry/internal/transfer"
 	"github.com/andrewstuart/ferry/internal/ui/diff"
@@ -66,6 +69,16 @@ type clearErrorMsg struct{}
 type reconnectMsg struct {
 	conn *ferrySSH.Connection
 	err  error
+}
+
+type s3ConnectSuccessMsg struct {
+	client *s3svc.Client
+	bucket string
+	prefix string
+}
+
+type s3ConnectErrorMsg struct {
+	err error
 }
 
 // clipboard stores yanked/cut entries for paste operations.
@@ -126,13 +139,20 @@ type Model struct {
 	syncRemoteRoot string // remote root used for the active sync comparison
 	syncProgress   chan diff.SyncProgressMsg // progress updates from sync goroutine
 
+	// S3 backend (nil when using SSH)
+	s3Client    *s3svc.Client
+	s3Bucket    string
+	s3Prefix    string
+	backendType string // "ssh" or "s3"
+
 	// Error
 	err error
 }
 
 // Options configures how the app starts.
 type Options struct {
-	Host string // If set, skip picker and connect directly
+	Host  string // If set, skip picker and connect to SSH host
+	S3URI string // If set, skip picker and connect to S3 (e.g., "s3://bucket/prefix")
 }
 
 // New creates the initial app model with the connection picker.
@@ -144,6 +164,7 @@ func New() Model {
 // If opts.Host is set, the picker is skipped and a direct connection is initiated.
 func NewWithOptions(opts Options) Model {
 	hosts, _ := ferrySSH.ParseConfigHosts(ferrySSH.DefaultConfigPath())
+	buckets, _ := s3util.ListBuckets(context.Background())
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -160,7 +181,7 @@ func NewWithOptions(opts Options) Model {
 
 	m := Model{
 		state:         statePicker,
-		picker:        picker.New(hosts),
+		picker:        picker.NewWithBuckets(hosts, buckets),
 		spinner:       sp,
 		inputField:    ti,
 		passwordInput: pw,
@@ -169,9 +190,14 @@ func NewWithOptions(opts Options) Model {
 		diffView:    diff.New(),
 	}
 
-	if opts.Host != "" {
+	if opts.S3URI != "" {
+		m.state = stateConnecting
+		m.connectHost = opts.S3URI
+		m.backendType = "s3"
+	} else if opts.Host != "" {
 		m.state = stateConnecting
 		m.connectHost = opts.Host
+		m.backendType = "ssh"
 	}
 
 	return m
@@ -179,6 +205,9 @@ func NewWithOptions(opts Options) Model {
 
 func (m Model) Init() tea.Cmd {
 	if m.state == stateConnecting {
+		if m.backendType == "s3" {
+			return tea.Batch(m.spinner.Tick, m.doS3Connect(m.connectHost))
+		}
 		return tea.Batch(m.spinner.Tick, m.doConnect(m.connectHost))
 	}
 	return tea.Batch(m.picker.Init(), m.spinner.Tick)
@@ -313,6 +342,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusBar.SetConnection(connInfo)
 		m.statusBar.SetError("Reconnected")
 		return m, tea.Batch(m.remotePane.Init(), clearErrorAfter(3*time.Second))
+
+	case s3ConnectSuccessMsg:
+		m.s3Client = msg.client
+		m.s3Bucket = msg.bucket
+		m.s3Prefix = msg.prefix
+		m.backendType = "s3"
+		m.state = stateBrowser
+
+		localFS := fs.NewLocalFS()
+		remoteFS := fs.NewS3FS(msg.client, msg.bucket, msg.prefix)
+
+		m.localPane = pane.New(localFS, "Local")
+		m.remotePane = pane.New(remoteFS, "S3")
+		m.activePane = 0
+		m.localPane.SetActive(true)
+		m.remotePane.SetActive(false)
+
+		connInfo := fmt.Sprintf("s3://%s", msg.bucket)
+		if msg.prefix != "" {
+			connInfo += "/" + strings.TrimSuffix(msg.prefix, "/")
+		}
+		m.statusBar.SetConnection(connInfo)
+		m.setPaneSizes()
+
+		return m, tea.Batch(m.localPane.Init(), m.remotePane.Init())
+
+	case s3ConnectErrorMsg:
+		m.state = statePicker
+		m.err = msg.err
+		m.picker.SetError(fmt.Sprintf("S3 connection failed: %v", msg.err))
+		return m, nil
 	}
 
 	switch m.state {
@@ -351,12 +411,22 @@ func (m Model) View() string {
 
 func (m Model) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case picker.HostSelected:
+	case picker.TargetSelected:
 		m.state = stateConnecting
-		m.connectHost = msg.Host
 		m.err = nil
 		m.picker.SetError("")
-		return m, tea.Batch(m.spinner.Tick, m.doConnect(msg.Host))
+		if msg.Target.Type == "s3" {
+			uri := "s3://" + msg.Target.Bucket
+			if msg.Target.Prefix != "" {
+				uri += "/" + msg.Target.Prefix
+			}
+			m.connectHost = uri
+			m.backendType = "s3"
+			return m, tea.Batch(m.spinner.Tick, m.doS3Connect(uri))
+		}
+		m.connectHost = msg.Target.Host
+		m.backendType = "ssh"
+		return m, tea.Batch(m.spinner.Tick, m.doConnect(msg.Target.Host))
 	}
 
 	var cmd tea.Cmd
@@ -569,7 +639,7 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "R":
 			m.lastKey = ""
-			if m.conn != nil {
+			if m.backendType == "ssh" && m.conn != nil {
 				m.statusBar.SetError("Reconnecting...")
 				return m, m.reconnect()
 			}
@@ -706,7 +776,11 @@ func (m Model) startSync() (tea.Model, tea.Cmd) {
 	localPath := m.localPane.Path()
 	remoteFS := m.remotePane.FS()
 	remotePath := m.remotePane.Path()
-	sshClient := m.conn.Client
+
+	hasRsync := false
+	if m.backendType == "ssh" && m.conn != nil {
+		hasRsync = transfer.HasRsync(m.conn.Client)
+	}
 
 	// If cursor is on a directory, sync that specific folder against the
 	// same-named folder on the other side.
@@ -748,7 +822,6 @@ func (m Model) startSync() (tea.Model, tea.Cmd) {
 		if err != nil {
 			return diff.SyncCompleteMsg{Err: err}
 		}
-		hasRsync := transfer.HasRsync(sshClient)
 		return diff.SyncStartMsg{Entries: entries, HasRsync: hasRsync}
 	}
 }
@@ -767,7 +840,7 @@ func (m Model) handleSyncAction(action diff.SyncAction) (tea.Model, tea.Cmd) {
 	total := len(diffEntries)
 
 	// Use rsync when all differing entries are selected and the remote supports it.
-	if m.diffView.HasRsync() && len(diffEntries) == m.diffView.DiffCount() {
+	if m.diffView.HasRsync() && len(diffEntries) == m.diffView.DiffCount() && m.backendType == "ssh" && m.conn != nil {
 		progress := make(chan diff.SyncProgressMsg, 1)
 		m.syncProgress = progress
 		m.diffView.SetSyncing("rsync starting...")
@@ -1281,6 +1354,24 @@ func (m Model) doConnectWithPassword(host, password string) tea.Cmd {
 			return connectErrorMsg{err: err}
 		}
 		return connectSuccessMsg{conn: conn}
+	}
+}
+
+func (m Model) doS3Connect(uri string) tea.Cmd {
+	return func() tea.Msg {
+		bucket, prefix, err := s3util.ParseS3URI(uri)
+		if err != nil {
+			return s3ConnectErrorMsg{err: err}
+		}
+		result, err := s3util.Connect(context.Background(), bucket, "")
+		if err != nil {
+			return s3ConnectErrorMsg{err: err}
+		}
+		return s3ConnectSuccessMsg{
+			client: result.Client,
+			bucket: result.Bucket,
+			prefix: prefix,
+		}
 	}
 }
 
