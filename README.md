@@ -14,7 +14,7 @@
 
 ---
 
-Ferry is a terminal-based file transfer tool built for engineers who live in the terminal. Dual-pane file browser (local + remote) over SSH, with vim-style keybindings, visual directory sync, and remote file editing — all without leaving the command line.
+Ferry is a terminal-based file transfer tool built for engineers who live in the terminal. Dual-pane file browser (local + remote) over SSH or S3, with vim-style keybindings, visual directory sync, and remote file editing — all without leaving the command line.
 
 ## Features
 
@@ -26,7 +26,8 @@ Ferry is a terminal-based file transfer tool built for engineers who live in the
 - **Transfer progress** — Speed, ETA, concurrent workers
 - **Overwrite protection** — Confirms before overwriting existing files
 - **Sortable file list** — Sort by name, size, or date; selection size totals
-- **Fuzzy connection picker** — Search your `~/.ssh/config` hosts
+- **S3 support** — Browse and transfer files to/from Amazon S3 buckets
+- **Fuzzy connection picker** — Search your `~/.ssh/config` hosts and S3 buckets
 - **Vim keybindings** — With arrow key support for the rest of us
 - **rsync integration** — Fast delta transfers when available
 
@@ -74,6 +75,8 @@ ferry                     # Launch connection picker
 ferry myhost              # Connect to SSH host
 ferry user@host           # Connect with explicit user
 ferry user@host:port      # Connect with user and port
+ferry s3://my-bucket      # Connect to S3 bucket
+ferry s3://my-bucket/path # Connect to S3 bucket at prefix
 ```
 
 ## Keybindings
@@ -121,9 +124,22 @@ ferry user@host:port      # Connect with user and port
 | `Esc` | Close overlay / cancel |
 | `q` / `Ctrl+c` | Quit |
 
+## S3 Support
+
+Ferry can browse and transfer files to/from Amazon S3 buckets:
+
+```sh
+ferry s3://my-bucket           # Connect to S3 bucket
+ferry s3://my-bucket/prefix    # Connect to specific prefix
+```
+
+Uses the standard AWS credential chain (environment variables, `~/.aws/credentials`, IAM roles). S3 buckets also appear in the connection picker when AWS credentials are detected.
+
+All features work with S3: browse, upload/download, sync/diff, rename, delete, mkdir, and remote editing.
+
 ## How It Works
 
-Ferry connects over SSH/SFTP using your existing `~/.ssh/config`. Files transfer through a concurrent engine with progress tracking. For directory sync, it compares file trees by size and modification time, then lets you selectively push or pull changes — or use rsync for the whole thing.
+Ferry connects over SSH/SFTP or S3 using your existing config. Files transfer through a concurrent engine with progress tracking. For directory sync, it compares file trees by size and modification time, then lets you selectively push or pull changes — or use rsync for SSH connections.
 
 Interrupted transfers are resumable: completed files are detected by matching size and mtime and skipped on retry. Failed transfers retry automatically (up to 2 times) to handle transient network issues. Writes use atomic temp files (`.ferry-tmp` → rename) so partial transfers are never mistaken for complete ones. Pasting into a directory with existing files prompts for overwrite confirmation.
 
@@ -146,6 +162,7 @@ Interrupted transfers are resumable: completed files are detected by matching si
 - [Lip Gloss](https://github.com/charmbracelet/lipgloss) — Terminal styling
 - [pkg/sftp](https://github.com/pkg/sftp) — SFTP client
 - [golang.org/x/crypto/ssh](https://pkg.go.dev/golang.org/x/crypto/ssh) — SSH client
+- [AWS SDK for Go v2](https://github.com/aws/aws-sdk-go-v2) — S3 client
 
 ## License
 
