@@ -16,10 +16,11 @@ import (
 )
 
 type ConnectionTarget struct {
-	Type   string // "ssh" or "s3"
-	Host   string // SSH host (for ssh type)
-	Bucket string // S3 bucket name (for s3 type)
-	Prefix string // S3 prefix (for s3 type)
+	Type    string // "ssh" or "s3"
+	Host    string // SSH host (for ssh type)
+	Bucket  string // S3 bucket name (for s3 type)
+	Prefix  string // S3 prefix (for s3 type)
+	Profile string // AWS profile (for s3 type)
 }
 
 type HostSelected struct {
@@ -122,7 +123,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if len(m.s3Buckets) > 0 {
 			bucketNames := make([]string, len(m.s3Buckets))
 			for i, b := range m.s3Buckets {
-				bucketNames[i] = b.Name
+				bucketNames[i] = b.Name + " " + b.Profile
 			}
 			bucketMatches := fuzzy.Find(query, bucketNames)
 			m.filteredBuckets = make([]s3util.BucketEntry, len(bucketMatches))
@@ -165,9 +166,11 @@ func (m Model) handleEnter() tea.Cmd {
 		}
 		bucketIdx := m.cursor - len(m.filtered)
 		if bucketIdx < len(m.filteredBuckets) {
+			b := m.filteredBuckets[bucketIdx]
 			return selectTarget(ConnectionTarget{
-				Type:   "s3",
-				Bucket: m.filteredBuckets[bucketIdx].Name,
+				Type:    "s3",
+				Bucket:  b.Name,
+				Profile: b.Profile,
 			})
 		}
 	}
@@ -226,12 +229,20 @@ func (m Model) View() string {
 		lines = append(lines, displayLine{text: text, selectable: true, index: i})
 	}
 
-	// S3 divider and buckets
+	// S3 buckets grouped by profile
 	if len(m.filteredBuckets) > 0 {
-		divider := lipgloss.NewStyle().Foreground(theme.Dim).Render("  ── S3 Buckets ──")
-		lines = append(lines, displayLine{text: divider, selectable: false, index: -1})
-
+		lastProfile := ""
 		for i, bucket := range m.filteredBuckets {
+			profile := bucket.Profile
+			if profile == "" {
+				profile = "default"
+			}
+			if profile != lastProfile {
+				divider := lipgloss.NewStyle().Foreground(theme.Dim).Render(
+					fmt.Sprintf("  ── S3: %s ──", profile))
+				lines = append(lines, displayLine{text: divider, selectable: false, index: -1})
+				lastProfile = profile
+			}
 			text := fmt.Sprintf("  s3://%s", bucket.Name)
 			lines = append(lines, displayLine{text: text, selectable: true, index: len(m.filtered) + i})
 		}

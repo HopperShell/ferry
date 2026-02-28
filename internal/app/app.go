@@ -72,9 +72,10 @@ type reconnectMsg struct {
 }
 
 type s3ConnectSuccessMsg struct {
-	client *s3svc.Client
-	bucket string
-	prefix string
+	client  *s3svc.Client
+	bucket  string
+	prefix  string
+	profile string
 }
 
 type s3ConnectErrorMsg struct {
@@ -143,6 +144,7 @@ type Model struct {
 	s3Client    *s3svc.Client
 	s3Bucket    string
 	s3Prefix    string
+	s3Profile   string // AWS profile used for connection
 	backendType string // "ssh" or "s3"
 
 	// Error
@@ -164,7 +166,7 @@ func New() Model {
 // If opts.Host is set, the picker is skipped and a direct connection is initiated.
 func NewWithOptions(opts Options) Model {
 	hosts, _ := ferrySSH.ParseConfigHosts(ferrySSH.DefaultConfigPath())
-	buckets, _ := s3util.ListBuckets(context.Background())
+	buckets := s3util.ListAllBuckets(context.Background())
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -206,7 +208,7 @@ func NewWithOptions(opts Options) Model {
 func (m Model) Init() tea.Cmd {
 	if m.state == stateConnecting {
 		if m.backendType == "s3" {
-			return tea.Batch(m.spinner.Tick, m.doS3Connect(m.connectHost))
+			return tea.Batch(m.spinner.Tick, m.doS3Connect(m.connectHost, m.s3Profile))
 		}
 		return tea.Batch(m.spinner.Tick, m.doConnect(m.connectHost))
 	}
@@ -422,7 +424,8 @@ func (m Model) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.connectHost = uri
 			m.backendType = "s3"
-			return m, tea.Batch(m.spinner.Tick, m.doS3Connect(uri))
+			m.s3Profile = msg.Target.Profile
+			return m, tea.Batch(m.spinner.Tick, m.doS3Connect(uri, msg.Target.Profile))
 		}
 		m.connectHost = msg.Target.Host
 		m.backendType = "ssh"
@@ -1357,20 +1360,21 @@ func (m Model) doConnectWithPassword(host, password string) tea.Cmd {
 	}
 }
 
-func (m Model) doS3Connect(uri string) tea.Cmd {
+func (m Model) doS3Connect(uri, profile string) tea.Cmd {
 	return func() tea.Msg {
 		bucket, prefix, err := s3util.ParseS3URI(uri)
 		if err != nil {
 			return s3ConnectErrorMsg{err: err}
 		}
-		result, err := s3util.Connect(context.Background(), bucket, "")
+		result, err := s3util.Connect(context.Background(), bucket, "", profile)
 		if err != nil {
 			return s3ConnectErrorMsg{err: err}
 		}
 		return s3ConnectSuccessMsg{
-			client: result.Client,
-			bucket: result.Bucket,
-			prefix: prefix,
+			client:  result.Client,
+			bucket:  result.Bucket,
+			prefix:  prefix,
+			profile: profile,
 		}
 	}
 }

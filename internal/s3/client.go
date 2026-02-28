@@ -34,10 +34,13 @@ func ParseS3URI(uri string) (bucket, prefix string, err error) {
 	return bucket, prefix, nil
 }
 
-func Connect(ctx context.Context, bucket, region string) (*ConnectResult, error) {
+func Connect(ctx context.Context, bucket, region, profile string) (*ConnectResult, error) {
 	var opts []func(*config.LoadOptions) error
 	if region != "" {
 		opts = append(opts, config.WithRegion(region))
+	}
+	if profile != "" && profile != "default" {
+		opts = append(opts, config.WithSharedConfigProfile(profile))
 	}
 
 	cfg, err := config.LoadDefaultConfig(ctx, opts...)
