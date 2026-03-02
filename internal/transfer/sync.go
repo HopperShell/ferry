@@ -42,23 +42,31 @@ const (
 	maxWalkDepth = 10
 	// maxWalkFiles limits total files enumerated per side to keep compare fast.
 	maxWalkFiles = 5000
-	// compareTimeout is the max time Compare will spend walking.
-	compareTimeout = 10 * time.Second
+	// localWalkTimeout is the max time for walking the local filesystem.
+	localWalkTimeout = 10 * time.Second
+	// remoteWalkTimeout is the max time for walking the remote filesystem.
+	// Remote walks are slower due to per-directory SFTP round-trips.
+	remoteWalkTimeout = 60 * time.Second
 )
 
 // Compare walks both FileSystems from the given root paths and returns a flat
 // list of DiffEntries representing the unified view.
 func Compare(localFS fs.FileSystem, localRoot string, remoteFS fs.FileSystem, remoteRoot string) ([]DiffEntry, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), compareTimeout)
-	defer cancel()
+	// Walk each side with its own timeout so a slow remote doesn't get
+	// starved by the local walk consuming the shared budget.
+	localCtx, localCancel := context.WithTimeout(context.Background(), localWalkTimeout)
+	defer localCancel()
 
 	// Treat non-existent directories as empty so sync can create them.
-	localMap, err := walkFS(ctx, localFS, localRoot, "", 0)
+	localMap, err := walkFS(localCtx, localFS, localRoot, "", 0)
 	if err != nil {
 		localMap = make(map[string]fs.Entry)
 	}
 
-	remoteMap, err := walkFS(ctx, remoteFS, remoteRoot, "", 0)
+	remoteCtx, remoteCancel := context.WithTimeout(context.Background(), remoteWalkTimeout)
+	defer remoteCancel()
+
+	remoteMap, err := walkFS(remoteCtx, remoteFS, remoteRoot, "", 0)
 	if err != nil {
 		remoteMap = make(map[string]fs.Entry)
 	}
