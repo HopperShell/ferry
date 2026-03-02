@@ -937,7 +937,7 @@ func (m Model) handleSyncAction(action diff.SyncAction) (tea.Model, tea.Cmd) {
 					srcPath := filepath.Join(srcRoot, de.RelPath)
 					if err := copyFile(srcFS, srcPath, dstFS, dstPath); err != nil {
 						// Continue on error — report in progress name.
-						progress <- diff.SyncProgressMsg{Done: i + 1, Total: total, Name: de.RelPath + " (error)"}
+						progress <- diff.SyncProgressMsg{Done: i + 1, Total: total, Name: fmt.Sprintf("%s (%v)", de.RelPath, err)}
 						continue
 					}
 					if stat, err := srcFS.Stat(srcPath); err == nil && !stat.ModTime.IsZero() {
@@ -988,7 +988,7 @@ func (m Model) handleMirrorAction(action diff.MirrorAction) (tea.Model, tea.Cmd)
 		target = "local"
 	}
 	m.inputMode = "confirm-mirror"
-	m.statusBar.SetError(fmt.Sprintf("Mirror %s: copy %d, delete %d %s-only files. y/n?", action.Direction, copyCount, deleteCount, target))
+	m.diffView.SetConfirmMsg(fmt.Sprintf("Mirror %s: copy %d, delete %d %s-only files. y/n?", action.Direction, copyCount, deleteCount, target))
 	return m, nil
 }
 
@@ -1100,7 +1100,7 @@ func (m Model) executeMirror() (tea.Model, tea.Cmd) {
 					srcPath := filepath.Join(srcRoot, de.RelPath)
 					if err := copyFile(srcFS, srcPath, dstFS, dstPath); err != nil {
 						done++
-						progress <- diff.SyncProgressMsg{Done: done, Total: total, Name: de.RelPath + " (error)"}
+						progress <- diff.SyncProgressMsg{Done: done, Total: total, Name: fmt.Sprintf("%s (%v)", de.RelPath, err)}
 						continue
 					}
 					if stat, err := srcFS.Stat(filepath.Join(srcRoot, de.RelPath)); err == nil && !stat.ModTime.IsZero() {
@@ -1124,6 +1124,7 @@ func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.inputMode = ""
 			m.pendingPaste = nil
+			m.diffView.SetConfirmMsg("")
 			m.inputField.Blur()
 			return m, nil
 
@@ -1134,6 +1135,7 @@ func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.inputMode == "confirm-delete" || m.inputMode == "confirm-overwrite" || m.inputMode == "confirm-mirror" {
 				m.inputMode = ""
 				m.pendingPaste = nil
+				m.diffView.SetConfirmMsg("")
 				m.inputField.Blur()
 				return m, nil
 			}
@@ -1150,6 +1152,7 @@ func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.inputMode == "confirm-mirror" {
 			if msg.String() == "y" {
 				m.inputMode = ""
+				m.diffView.SetConfirmMsg("")
 				return m.executeMirror()
 			}
 			return m, nil
