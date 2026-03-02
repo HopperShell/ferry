@@ -63,6 +63,7 @@ type Model struct {
 	syncDone      int    // completed items
 	syncTotal     int    // total items to transfer
 	mirrorPending bool   // true after pressing M, waiting for direction
+	confirmMsg    string // shown in footer when awaiting y/n confirmation
 }
 
 // New creates a new empty diff view model.
@@ -96,6 +97,12 @@ func (m *Model) SetSyncProgress(done, total int, name string) {
 	m.syncDone = done
 	m.syncTotal = total
 	m.syncStatus = name
+}
+
+// SetConfirmMsg sets a confirmation message shown in the footer.
+// Pass "" to clear it.
+func (m *Model) SetConfirmMsg(msg string) {
+	m.confirmMsg = msg
 }
 
 // HasRsync returns whether the remote has rsync available.
@@ -349,7 +356,9 @@ func (m Model) View() string {
 
 	// Footer with keybindings.
 	footerStyle := lipgloss.NewStyle().Foreground(theme.Dim)
-	if m.syncing {
+	if m.confirmMsg != "" {
+		lines = append(lines, lipgloss.NewStyle().Foreground(theme.Amber).Bold(true).Render("  "+m.confirmMsg))
+	} else if m.syncing {
 		lines = append(lines, footerStyle.Render("  Transferring..."))
 	} else if m.mirrorPending {
 		lines = append(lines, lipgloss.NewStyle().Foreground(theme.Amber).Bold(true).Render("  Press → to mirror-push to remote, ← to mirror-pull to local, Esc to cancel"))
