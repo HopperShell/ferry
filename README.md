@@ -103,6 +103,7 @@ ferry s3://my-bucket/path # Connect to S3 bucket at prefix
 | `Ctrl+u` | Page up |
 | `Tab` | Switch active pane |
 | `/` | Search / filter |
+| `Ctrl+f` | Recursive find |
 | `H` | Toggle hidden files |
 | `s` | Cycle sort (name → size → date) |
 
