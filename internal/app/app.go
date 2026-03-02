@@ -1021,12 +1021,17 @@ func (m Model) executeMirror() (tea.Model, tea.Cmd) {
 				}
 			}()
 
+			count := 0
 			for line := range rsyncProgress {
-				progress <- diff.SyncProgressMsg{Done: 0, Total: 0, Name: line}
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				count++
+				progress <- diff.SyncProgressMsg{Done: count, Total: 0, Name: line}
 			}
 
 			if err := <-errCh; err != nil {
-				progress <- diff.SyncProgressMsg{Done: 0, Total: 0, Name: "rsync error: " + err.Error()}
+				progress <- diff.SyncProgressMsg{Done: count, Total: 0, Name: "rsync error: " + err.Error()}
 			}
 			close(progress)
 		}()

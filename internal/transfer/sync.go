@@ -225,7 +225,7 @@ func RsyncPull(remotePath, localPath, host string, progress chan<- string) error
 func RsyncMirrorPush(localPath, remotePath, host string, progress chan<- string) error {
 	defer close(progress)
 
-	cmd := exec.Command("rsync", "-avz", "--delete", "--progress",
+	cmd := exec.Command("rsync", "-avz", "--delete", "--info=name",
 		"-e", "ssh",
 		localPath+"/",
 		fmt.Sprintf("%s:%s/", host, remotePath),
@@ -239,7 +239,7 @@ func RsyncMirrorPush(localPath, remotePath, host string, progress chan<- string)
 func RsyncMirrorPull(remotePath, localPath, host string, progress chan<- string) error {
 	defer close(progress)
 
-	cmd := exec.Command("rsync", "-avz", "--delete", "--progress",
+	cmd := exec.Command("rsync", "-avz", "--delete", "--info=name",
 		"-e", "ssh",
 		fmt.Sprintf("%s:%s/", host, remotePath),
 		localPath+"/",
