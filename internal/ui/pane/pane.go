@@ -1,6 +1,7 @@
 package pane
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,13 @@ type entriesMsg struct {
 type errMsg struct {
 	label string
 	err   error
+}
+
+// findResultsMsg delivers a batch of recursive walk results to the pane.
+type findResultsMsg struct {
+	label   string
+	results []fs.WalkResult
+	done    bool // true when the walk has completed
 }
 
 // TransferRequestMsg is emitted when the user presses Enter on a file (or with
@@ -79,6 +87,19 @@ type Model struct {
 	lastKey     string   // for gg detection
 	active      bool     // whether this pane is the focused pane
 	sortMode    SortMode // current sort order
+
+	// Recursive find (Ctrl+f) state.
+	find         bool                   // whether find mode is active
+	findInput    textinput.Model        // search text input
+	findResults  []fs.WalkResult        // accumulated walk results
+	findFiltered []int                  // indices into findResults matching query
+	findCursor   int                    // cursor position in filtered results
+	findOffset   int                    // scroll offset for find results
+	findDone     bool                   // walk finished
+	findCancel   context.CancelFunc     // cancels the walk goroutine
+	findCh       <-chan fs.WalkResult   // channel for receiving walk results
+
+	pendingHighlight string // filename to highlight after next entriesMsg
 }
 
 // New creates a new pane backed by the given filesystem.
@@ -87,12 +108,17 @@ func New(filesystem fs.FileSystem, label string) Model {
 	ti.Prompt = "/"
 	ti.CharLimit = 256
 
+	fi := textinput.New()
+	fi.Prompt = "find: "
+	fi.CharLimit = 256
+
 	return Model{
 		fs:          filesystem,
 		label:       label,
 		path:        "/",
 		selected:    make(map[string]bool),
 		searchInput: ti,
+		findInput:   fi,
 		anchor:      -1,
 	}
 }
@@ -189,7 +215,35 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.search = false
 		m.searchInput.SetValue("")
 		m.applyFilters()
+		// If we're jumping to a file from find mode, highlight it.
+		if m.pendingHighlight != "" {
+			name := m.pendingHighlight
+			m.pendingHighlight = ""
+			for i := 0; i < m.visibleCount(); i++ {
+				idx := m.mapIndex(i)
+				if idx >= 0 && idx < len(m.entries) && m.entries[idx].Name == name {
+					m.cursor = i
+					break
+				}
+			}
+		}
 		m.clampCursor()
+		m.ensureVisible()
+		return m, nil
+
+	case findResultsMsg:
+		if msg.label != m.label {
+			return m, nil
+		}
+		if !m.find {
+			return m, nil // find was cancelled, ignore stale results
+		}
+		m.findResults = append(m.findResults, msg.results...)
+		m.findDone = msg.done
+		m.applyFindFilter()
+		if !msg.done {
+			return m, m.readWalkBatch()
+		}
 		return m, nil
 
 	case errMsg:
@@ -200,6 +254,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.find {
+			return m.updateFind(msg)
+		}
 		// In search mode, most keys go to the text input.
 		if m.search {
 			return m.updateSearch(msg)
@@ -372,9 +429,139 @@ func (m Model) updateNormal(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.search = true
 		m.searchInput.Focus()
 		return m, textinput.Blink
+
+	case "ctrl+f":
+		return m.startFind()
 	}
 
 	return m, nil
+}
+
+// --- Recursive find (Ctrl+f) ---
+
+func (m Model) startFind() (Model, tea.Cmd) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan fs.WalkResult, 64)
+	go fs.Walk(ctx, m.fs, m.path, ch)
+
+	m.find = true
+	m.findResults = nil
+	m.findFiltered = nil
+	m.findCursor = 0
+	m.findOffset = 0
+	m.findDone = false
+	m.findCancel = cancel
+	m.findCh = ch
+	m.findInput.SetValue("")
+	m.findInput.Focus()
+
+	return m, tea.Batch(textinput.Blink, m.readWalkBatch())
+}
+
+// readWalkBatch returns a Cmd that reads up to 50 results from the walk channel.
+func (m Model) readWalkBatch() tea.Cmd {
+	ch := m.findCh
+	label := m.label
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		var batch []fs.WalkResult
+		for {
+			r, ok := <-ch
+			if !ok {
+				return findResultsMsg{label: label, results: batch, done: true}
+			}
+			batch = append(batch, r)
+			if len(batch) >= 50 {
+				return findResultsMsg{label: label, results: batch, done: false}
+			}
+		}
+	}
+}
+
+func (m Model) updateFind(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		if m.findCancel != nil {
+			m.findCancel()
+		}
+		m.find = false
+		m.findInput.Blur()
+		m.findResults = nil
+		m.findFiltered = nil
+		return m, nil
+
+	case "enter":
+		if len(m.findFiltered) > 0 && m.findCursor >= 0 && m.findCursor < len(m.findFiltered) {
+			r := m.findResults[m.findFiltered[m.findCursor]]
+			if m.findCancel != nil {
+				m.findCancel()
+			}
+			m.find = false
+			m.findInput.Blur()
+			m.pendingHighlight = r.Entry.Name
+			// Navigate to the directory containing this entry.
+			return m, m.listDir(r.Dir)
+		}
+		return m, nil
+
+	case "up", "ctrl+p":
+		if m.findCursor > 0 {
+			m.findCursor--
+			m.ensureFindVisible()
+		}
+		return m, nil
+
+	case "down", "ctrl+n":
+		if m.findCursor < len(m.findFiltered)-1 {
+			m.findCursor++
+			m.ensureFindVisible()
+		}
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.findInput, cmd = m.findInput.Update(msg)
+	m.applyFindFilter()
+	return m, cmd
+}
+
+func (m *Model) applyFindFilter() {
+	query := m.findInput.Value()
+	if query == "" {
+		// Show all results.
+		m.findFiltered = make([]int, len(m.findResults))
+		for i := range m.findResults {
+			m.findFiltered[i] = i
+		}
+		m.findCursor = 0
+		m.findOffset = 0
+		return
+	}
+
+	candidates := make([]string, len(m.findResults))
+	for i, r := range m.findResults {
+		candidates[i] = r.Entry.Name
+	}
+
+	matches := fuzzy.Find(query, candidates)
+	m.findFiltered = nil
+	for _, match := range matches {
+		m.findFiltered = append(m.findFiltered, match.Index)
+	}
+	m.findCursor = 0
+	m.findOffset = 0
+}
+
+func (m *Model) ensureFindVisible() {
+	lh := m.listHeight()
+	if m.findCursor < m.findOffset {
+		m.findOffset = m.findCursor
+	}
+	if m.findCursor >= m.findOffset+lh {
+		m.findOffset = m.findCursor - lh + 1
+	}
 }
 
 // View renders the pane.
@@ -388,58 +575,116 @@ func (m Model) View() string {
 	// Header: label + path.
 	title := theme.TitleStyle.Render(m.label + ": " + m.shortenPath(contentWidth-4))
 
-	// File list.
-	var rows []string
-	visCount := m.visibleCount()
+	var body, footer string
 
-	if !m.loaded {
-		// First listing hasn't completed yet.
-		loadingMsg := lipgloss.NewStyle().Foreground(theme.Dim).Italic(true).Render("Loading...")
-		rows = append(rows, loadingMsg)
-	} else if visCount == 0 {
-		// Directory is empty (or all entries filtered out).
-		emptyMsg := lipgloss.NewStyle().Foreground(theme.Dim).Italic(true).Render("(empty)")
-		rows = append(rows, emptyMsg)
-	} else {
-		for i := m.offset; i < m.offset+listH && i < visCount; i++ {
-			idx := m.mapIndex(i)
-			if idx < 0 || idx >= len(m.entries) {
+	if m.find {
+		// Find mode: show input + filtered results dropdown.
+		var rows []string
+		for i := m.findOffset; i < m.findOffset+listH && i < len(m.findFiltered); i++ {
+			idx := m.findFiltered[i]
+			if idx < 0 || idx >= len(m.findResults) {
 				continue
 			}
-			e := m.entries[idx]
-			row := m.renderRow(e, i, contentWidth)
-			rows = append(rows, row)
-		}
-	}
-	// Pad remaining lines.
-	for len(rows) < listH {
-		rows = append(rows, strings.Repeat(" ", contentWidth))
-	}
-
-	body := strings.Join(rows, "\n")
-
-	// Footer: search bar or status.
-	var footer string
-	if m.search {
-		footer = m.searchInput.View()
-	} else if m.err != nil {
-		footer = theme.ErrorStyle.Render(m.err.Error())
-	} else {
-		selCount := len(m.selected)
-		info := fmt.Sprintf(" %d items", visCount)
-		if selCount > 0 {
-			var totalSize int64
-			for _, e := range m.entries {
-				if m.selected[e.Path] && !e.IsDir {
-					totalSize += e.Size
-				}
+			r := m.findResults[idx]
+			name := r.Entry.Name
+			if r.Entry.IsDir {
+				name += "/"
 			}
-			info += fmt.Sprintf(" | %d selected (%s)", selCount, formatSize(totalSize))
+			// Show relative path from current directory.
+			relDir := strings.TrimPrefix(r.Dir, m.path)
+			relDir = strings.TrimPrefix(relDir, "/")
+			var display string
+			if relDir != "" {
+				display = relDir + "/" + name
+			} else {
+				display = name
+			}
+			if len(display) > contentWidth {
+				display = display[:contentWidth-1] + "\u2026"
+			}
+
+			var styled string
+			if r.Entry.IsDir {
+				styled = theme.DirStyle.Render(display)
+			} else {
+				styled = theme.FileStyle.Render(display)
+			}
+			// Pad to full width.
+			pad := contentWidth - lipgloss.Width(styled)
+			if pad > 0 {
+				styled += strings.Repeat(" ", pad)
+			}
+			if i == m.findCursor {
+				styled = theme.CursorStyle.Render(styled)
+			}
+			rows = append(rows, styled)
 		}
-		if m.sortMode != SortByName {
-			info += fmt.Sprintf(" | sort: %s", m.sortMode)
+		if len(rows) == 0 {
+			msg := "(no results)"
+			if !m.findDone {
+				msg = "(searching...)"
+			}
+			rows = append(rows, lipgloss.NewStyle().Foreground(theme.Dim).Italic(true).Render(msg))
 		}
-		footer = lipgloss.NewStyle().Foreground(theme.Dim).Render(info)
+		for len(rows) < listH {
+			rows = append(rows, strings.Repeat(" ", contentWidth))
+		}
+		body = strings.Join(rows, "\n")
+
+		// Footer: input + status.
+		status := fmt.Sprintf(" %d results", len(m.findFiltered))
+		if !m.findDone {
+			status += " (searching...)"
+		}
+		footer = m.findInput.View() + lipgloss.NewStyle().Foreground(theme.Dim).Render(status)
+	} else {
+		// Normal mode: file list.
+		var rows []string
+		visCount := m.visibleCount()
+
+		if !m.loaded {
+			loadingMsg := lipgloss.NewStyle().Foreground(theme.Dim).Italic(true).Render("Loading...")
+			rows = append(rows, loadingMsg)
+		} else if visCount == 0 {
+			emptyMsg := lipgloss.NewStyle().Foreground(theme.Dim).Italic(true).Render("(empty)")
+			rows = append(rows, emptyMsg)
+		} else {
+			for i := m.offset; i < m.offset+listH && i < visCount; i++ {
+				idx := m.mapIndex(i)
+				if idx < 0 || idx >= len(m.entries) {
+					continue
+				}
+				e := m.entries[idx]
+				row := m.renderRow(e, i, contentWidth)
+				rows = append(rows, row)
+			}
+		}
+		for len(rows) < listH {
+			rows = append(rows, strings.Repeat(" ", contentWidth))
+		}
+		body = strings.Join(rows, "\n")
+
+		if m.search {
+			footer = m.searchInput.View()
+		} else if m.err != nil {
+			footer = theme.ErrorStyle.Render(m.err.Error())
+		} else {
+			selCount := len(m.selected)
+			info := fmt.Sprintf(" %d items", visCount)
+			if selCount > 0 {
+				var totalSize int64
+				for _, e := range m.entries {
+					if m.selected[e.Path] && !e.IsDir {
+						totalSize += e.Size
+					}
+				}
+				info += fmt.Sprintf(" | %d selected (%s)", selCount, formatSize(totalSize))
+			}
+			if m.sortMode != SortByName {
+				info += fmt.Sprintf(" | sort: %s", m.sortMode)
+			}
+			footer = lipgloss.NewStyle().Foreground(theme.Dim).Render(info)
+		}
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, title, body, footer)

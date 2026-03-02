@@ -72,6 +72,7 @@ func (h *HelpOverlay) View() string {
 		entry("Ctrl+u", "Page up"),
 		entry("Tab", "Switch pane"),
 		entry("/", "Search"),
+		entry("Ctrl+f", "Find (recursive)"),
 		entry("H", "Hidden files"),
 		entry("s", "Cycle sort"),
 		entry("Space", "Select"),
