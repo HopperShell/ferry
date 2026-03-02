@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/andrewstuart/ferry/internal/app"
+	"github.com/HopperShell/ferry/internal/app"
 )
 
 var version = "dev"

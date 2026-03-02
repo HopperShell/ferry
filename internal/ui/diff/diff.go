@@ -8,8 +8,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/andrewstuart/ferry/internal/transfer"
-	"github.com/andrewstuart/ferry/internal/ui/theme"
+	"github.com/HopperShell/ferry/internal/transfer"
+	"github.com/HopperShell/ferry/internal/ui/theme"
 )
 
 // SyncStartMsg carries the comparison result to the diff view.

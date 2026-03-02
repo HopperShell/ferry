@@ -7,8 +7,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	transferEngine "github.com/andrewstuart/ferry/internal/transfer"
-	"github.com/andrewstuart/ferry/internal/ui/theme"
+	transferEngine "github.com/HopperShell/ferry/internal/transfer"
+	"github.com/HopperShell/ferry/internal/ui/theme"
 )
 
 // Overlay renders a transfer progress modal over the dual-pane browser.
