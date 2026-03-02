@@ -19,7 +19,7 @@
 
 **Step 1: Initialize Go module**
 
-Run: `go mod init github.com/andrewstuart/ferry`
+Run: `go mod init github.com/HopperShell/ferry`
 
 **Step 2: Create minimal main.go**
 
@@ -32,7 +32,7 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/andrewstuart/ferry/internal/app"
+	"github.com/HopperShell/ferry/internal/app"
 )
 
 func main() {
@@ -245,7 +245,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/andrewstuart/ferry/internal/fs"
+	"github.com/HopperShell/ferry/internal/fs"
 )
 
 func TestLocalFS_List(t *testing.T) {
@@ -456,7 +456,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	ferrySSH "github.com/andrewstuart/ferry/internal/ssh"
+	ferrySSH "github.com/HopperShell/ferry/internal/ssh"
 )
 
 func TestParseSSHConfigHosts(t *testing.T) {
@@ -1048,8 +1048,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sahilm/fuzzy"
 
-	ferrySSH "github.com/andrewstuart/ferry/internal/ssh"
-	"github.com/andrewstuart/ferry/internal/ui/theme"
+	ferrySSH "github.com/HopperShell/ferry/internal/ssh"
+	"github.com/HopperShell/ferry/internal/ui/theme"
 )
 
 type HostSelected struct {

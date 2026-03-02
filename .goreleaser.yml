@@ -40,9 +40,9 @@ changelog:
 
 # brews:
 #   - repository:
-#       owner: andrewstuart
+#       owner: HopperShell
 #       name: homebrew-tap
-#     homepage: "https://github.com/andrewstuart/ferry"
+#     homepage: "https://github.com/HopperShell/ferry"
 #     description: "Secure file transfer, terminal style"
 #     license: "MIT"
 #     install: |

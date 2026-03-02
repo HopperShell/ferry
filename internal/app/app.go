@@ -18,17 +18,17 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/andrewstuart/ferry/internal/editor"
-	"github.com/andrewstuart/ferry/internal/fs"
-	s3util "github.com/andrewstuart/ferry/internal/s3"
-	ferrySSH "github.com/andrewstuart/ferry/internal/ssh"
-	"github.com/andrewstuart/ferry/internal/transfer"
-	"github.com/andrewstuart/ferry/internal/ui/diff"
-	"github.com/andrewstuart/ferry/internal/ui/modal"
-	"github.com/andrewstuart/ferry/internal/ui/pane"
-	"github.com/andrewstuart/ferry/internal/ui/picker"
-	"github.com/andrewstuart/ferry/internal/ui/statusbar"
-	"github.com/andrewstuart/ferry/internal/ui/theme"
+	"github.com/HopperShell/ferry/internal/editor"
+	"github.com/HopperShell/ferry/internal/fs"
+	s3util "github.com/HopperShell/ferry/internal/s3"
+	ferrySSH "github.com/HopperShell/ferry/internal/ssh"
+	"github.com/HopperShell/ferry/internal/transfer"
+	"github.com/HopperShell/ferry/internal/ui/diff"
+	"github.com/HopperShell/ferry/internal/ui/modal"
+	"github.com/HopperShell/ferry/internal/ui/pane"
+	"github.com/HopperShell/ferry/internal/ui/picker"
+	"github.com/HopperShell/ferry/internal/ui/statusbar"
+	"github.com/HopperShell/ferry/internal/ui/theme"
 )
 
 // appState represents the current UI state.

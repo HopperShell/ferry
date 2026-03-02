@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/andrewstuart/ferry/internal/fs"
-	"github.com/andrewstuart/ferry/internal/transfer"
+	"github.com/HopperShell/ferry/internal/fs"
+	"github.com/HopperShell/ferry/internal/transfer"
 )
 
 // failingWriteFS wraps a FileSystem and fails on Write the first N times.

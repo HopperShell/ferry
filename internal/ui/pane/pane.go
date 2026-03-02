@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andrewstuart/ferry/internal/fs"
-	"github.com/andrewstuart/ferry/internal/ui/theme"
+	"github.com/HopperShell/ferry/internal/fs"
+	"github.com/HopperShell/ferry/internal/ui/theme"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"

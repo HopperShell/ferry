@@ -7,8 +7,8 @@
 </p>
 
 <!-- <p align="center">
-  <a href="https://goreportcard.com/report/github.com/andrewstuart/ferry"><img src="https://goreportcard.com/badge/github.com/andrewstuart/ferry" alt="Go Report Card"></a>
-  <a href="https://github.com/andrewstuart/ferry/releases"><img src="https://img.shields.io/github/v/release/andrewstuart/ferry" alt="Release"></a>
+  <a href="https://goreportcard.com/report/github.com/HopperShell/ferry"><img src="https://goreportcard.com/badge/github.com/HopperShell/ferry" alt="Go Report Card"></a>
+  <a href="https://github.com/HopperShell/ferry/releases"><img src="https://img.shields.io/github/v/release/HopperShell/ferry" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
 </p> -->
 
@@ -36,23 +36,23 @@ Ferry is a terminal-based file transfer tool built for engineers who live in the
 ### From source
 
 ```sh
-go install github.com/andrewstuart/ferry/cmd/ferry@latest
+go install github.com/HopperShell/ferry/cmd/ferry@latest
 ```
 
 ### Binary releases
 
-Download a prebuilt binary from the [Releases](https://github.com/andrewstuart/ferry/releases) page.
+Download a prebuilt binary from the [Releases](https://github.com/HopperShell/ferry/releases) page.
 
 <!-- ### Homebrew
 ```sh
-brew install andrewstuart/tap/ferry
+brew install HopperShell/tap/ferry
 ``` -->
 
 ## Quick Start
 
 ```sh
 # Install
-go install github.com/andrewstuart/ferry/cmd/ferry@latest
+go install github.com/HopperShell/ferry/cmd/ferry@latest
 
 # Connect to a host (or just run `ferry` to pick from ~/.ssh/config)
 ferry myhost

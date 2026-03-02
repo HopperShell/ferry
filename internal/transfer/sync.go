@@ -10,7 +10,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/andrewstuart/ferry/internal/fs"
+	"github.com/HopperShell/ferry/internal/fs"
 	"golang.org/x/crypto/ssh"
 )
 

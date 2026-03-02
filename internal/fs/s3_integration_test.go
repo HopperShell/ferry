@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	s3util "github.com/andrewstuart/ferry/internal/s3"
+	s3util "github.com/HopperShell/ferry/internal/s3"
 
-	"github.com/andrewstuart/ferry/internal/fs"
+	"github.com/HopperShell/ferry/internal/fs"
 )
 
 // Run with: AWS_ENDPOINT_URL=http://localhost:9000 go test ./internal/fs/ -tags integration -v -run TestS3FS_Integration

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/andrewstuart/ferry/internal/ui/theme"
+	"github.com/HopperShell/ferry/internal/ui/theme"
 	"github.com/charmbracelet/lipgloss"
 )
 

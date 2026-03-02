@@ -8,8 +8,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/andrewstuart/ferry/internal/fs"
-	"github.com/andrewstuart/ferry/internal/ui/theme"
+	"github.com/HopperShell/ferry/internal/fs"
+	"github.com/HopperShell/ferry/internal/ui/theme"
 )
 
 // InfoPanel renders file metadata as a bottom panel below the panes.

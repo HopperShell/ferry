@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/andrewstuart/ferry/internal/fs"
+	"github.com/HopperShell/ferry/internal/fs"
 )
 
 func TestLocalFS_List(t *testing.T) {

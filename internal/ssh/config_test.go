@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	ferrySSH "github.com/andrewstuart/ferry/internal/ssh"
+	ferrySSH "github.com/HopperShell/ferry/internal/ssh"
 )
 
 func TestParseSSHConfigHosts(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/andrewstuart/ferry/internal/fs"
+	"github.com/HopperShell/ferry/internal/fs"
 	tea "github.com/charmbracelet/bubbletea"
 )
 

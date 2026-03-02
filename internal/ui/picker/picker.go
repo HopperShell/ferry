@@ -10,9 +10,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sahilm/fuzzy"
 
-	s3util "github.com/andrewstuart/ferry/internal/s3"
-	ferrySSH "github.com/andrewstuart/ferry/internal/ssh"
-	"github.com/andrewstuart/ferry/internal/ui/theme"
+	s3util "github.com/HopperShell/ferry/internal/s3"
+	ferrySSH "github.com/HopperShell/ferry/internal/ssh"
+	"github.com/HopperShell/ferry/internal/ui/theme"
 )
 
 type ConnectionTarget struct {
