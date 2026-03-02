@@ -3,11 +3,13 @@ package transfer
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
 	"path"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/HopperShell/ferry/internal/fs"
@@ -225,7 +227,7 @@ func RsyncPull(remotePath, localPath, host string, progress chan<- string) error
 func RsyncMirrorPush(localPath, remotePath, host string, progress chan<- string) error {
 	defer close(progress)
 
-	cmd := exec.Command("rsync", "-avz", "--delete", "--info=name",
+	cmd := exec.Command("rsync", "-avz", "--delete", "--progress",
 		"-e", "ssh",
 		localPath+"/",
 		fmt.Sprintf("%s:%s/", host, remotePath),
@@ -239,7 +241,7 @@ func RsyncMirrorPush(localPath, remotePath, host string, progress chan<- string)
 func RsyncMirrorPull(remotePath, localPath, host string, progress chan<- string) error {
 	defer close(progress)
 
-	cmd := exec.Command("rsync", "-avz", "--delete", "--info=name",
+	cmd := exec.Command("rsync", "-avz", "--delete", "--progress",
 		"-e", "ssh",
 		fmt.Sprintf("%s:%s/", host, remotePath),
 		localPath+"/",
@@ -249,11 +251,15 @@ func RsyncMirrorPull(remotePath, localPath, host string, progress chan<- string)
 }
 
 // runRsync executes an rsync command, streaming stdout lines to the progress channel.
+// Stderr is captured and included in the error message on failure.
 func runRsync(cmd *exec.Cmd, progress chan<- string) error {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("rsync stdout: %w", err)
 	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("rsync start: %w", err)
@@ -265,6 +271,10 @@ func runRsync(cmd *exec.Cmd, progress chan<- string) error {
 	}
 
 	if err := cmd.Wait(); err != nil {
+		errMsg := strings.TrimSpace(stderr.String())
+		if errMsg != "" {
+			return fmt.Errorf("rsync: %s", errMsg)
+		}
 		return fmt.Errorf("rsync: %w", err)
 	}
 	return nil
