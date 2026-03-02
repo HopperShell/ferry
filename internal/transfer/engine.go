@@ -167,6 +167,9 @@ func (e *Engine) walkAndEnqueue(srcFS fs.FileSystem, srcDir string, dstFS fs.Fil
 		return
 	}
 	for _, entry := range entries {
+		if entry.IsDir && fs.SkipDirs[entry.Name] {
+			continue
+		}
 		childDisplay := filepath.Join(displayPrefix, entry.Name)
 		if entry.IsDir {
 			e.walkAndEnqueue(srcFS, entry.Path, dstFS, filepath.Join(dstDir, entry.Name), childDisplay)
