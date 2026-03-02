@@ -126,6 +126,7 @@ ferry s3://my-bucket/path # Connect to S3 bucket at prefix
 | Key | Action |
 |-----|--------|
 | `S` | Enter sync/diff view |
+| `M`+`→`/`←` | Mirror push/pull (in sync view) |
 | `i` | Toggle file info panel |
 | `t` | Toggle transfer queue |
 | `?` | Help overlay |

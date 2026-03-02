@@ -6,8 +6,9 @@ import (
 	"context"
 	"fmt"
 	"io"
-"os"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -138,6 +139,8 @@ type Model struct {
 	syncLocalRoot  string // local root used for the active sync comparison
 	syncRemoteRoot string // remote root used for the active sync comparison
 	syncProgress   chan diff.SyncProgressMsg // progress updates from sync goroutine
+	mirrorAction   diff.MirrorAction         // pending mirror direction
+	mirrorEntries  []transfer.DiffEntry      // all entries for mirror confirmation
 
 	// S3 backend (nil when using SSH)
 	s3Client    *s3svc.Client
@@ -282,6 +285,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case diff.SyncAction:
 		return m.handleSyncAction(msg)
+
+	case diff.MirrorAction:
+		return m.handleMirrorAction(msg)
 
 	case diff.SyncProgressMsg:
 		m.diffView.SetSyncProgress(msg.Done, msg.Total, msg.Name)
@@ -774,6 +780,10 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 // --- State: Sync ---
 
 func (m Model) updateSync(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.inputMode == "confirm-mirror" {
+		return m.updateInputMode(msg)
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if msg.String() == "esc" {
@@ -944,6 +954,169 @@ func (m Model) handleSyncAction(action diff.SyncAction) (tea.Model, tea.Cmd) {
 	return m, m.listenSyncProgress()
 }
 
+// handleMirrorAction sets up the confirmation prompt for a mirror operation.
+func (m Model) handleMirrorAction(action diff.MirrorAction) (tea.Model, tea.Cmd) {
+	entries := m.diffView.DiffEntries()
+	m.mirrorAction = action
+	m.mirrorEntries = entries
+
+	// Count copies and deletes for the confirmation message.
+	var copyCount, deleteCount int
+	for _, de := range entries {
+		if de.Status == transfer.DiffSame {
+			continue
+		}
+		if action.Direction == "push" {
+			switch de.Status {
+			case transfer.DiffLocalOnly, transfer.DiffModified:
+				copyCount++
+			case transfer.DiffRemoteOnly:
+				deleteCount++
+			}
+		} else {
+			switch de.Status {
+			case transfer.DiffRemoteOnly, transfer.DiffModified:
+				copyCount++
+			case transfer.DiffLocalOnly:
+				deleteCount++
+			}
+		}
+	}
+
+	target := "remote"
+	if action.Direction == "pull" {
+		target = "local"
+	}
+	m.inputMode = "confirm-mirror"
+	m.statusBar.SetError(fmt.Sprintf("Mirror %s: copy %d, delete %d %s-only files. y/n?", action.Direction, copyCount, deleteCount, target))
+	return m, nil
+}
+
+// executeMirror performs the mirror operation: copies differing files and deletes orphans.
+func (m Model) executeMirror() (tea.Model, tea.Cmd) {
+	localFS := m.localPane.FS()
+	remoteFS := m.remotePane.FS()
+	localRoot := m.syncLocalRoot
+	remoteRoot := m.syncRemoteRoot
+	direction := m.mirrorAction.Direction
+	entries := m.mirrorEntries
+
+	// Separate into copies and deletes.
+	var toCopy []transfer.DiffEntry
+	var toDelete []transfer.DiffEntry
+	for _, de := range entries {
+		if de.Status == transfer.DiffSame {
+			continue
+		}
+		if direction == "push" {
+			switch de.Status {
+			case transfer.DiffLocalOnly, transfer.DiffModified:
+				toCopy = append(toCopy, de)
+			case transfer.DiffRemoteOnly:
+				toDelete = append(toDelete, de)
+			}
+		} else {
+			switch de.Status {
+			case transfer.DiffRemoteOnly, transfer.DiffModified:
+				toCopy = append(toCopy, de)
+			case transfer.DiffLocalOnly:
+				toDelete = append(toDelete, de)
+			}
+		}
+	}
+
+	total := len(toCopy) + len(toDelete)
+	progress := make(chan diff.SyncProgressMsg, total)
+	m.syncProgress = progress
+	m.diffView.SetSyncing(fmt.Sprintf("0/%d", total))
+
+	go func() {
+		done := 0
+
+		// Delete files first (non-dirs), then directories deepest-first.
+		var files, dirs []transfer.DiffEntry
+		for _, de := range toDelete {
+			if de.IsDir {
+				dirs = append(dirs, de)
+			} else {
+				files = append(files, de)
+			}
+		}
+
+		// Sort dirs by path depth descending (deepest first).
+		sort.Slice(dirs, func(i, j int) bool {
+			return strings.Count(dirs[i].RelPath, "/") > strings.Count(dirs[j].RelPath, "/")
+		})
+
+		var delFS fs.FileSystem
+		var delRoot string
+		if direction == "push" {
+			delFS = remoteFS
+			delRoot = remoteRoot
+		} else {
+			delFS = localFS
+			delRoot = localRoot
+		}
+
+		for _, de := range files {
+			delPath := filepath.Join(delRoot, de.RelPath)
+			_ = delFS.Remove(delPath)
+			done++
+			progress <- diff.SyncProgressMsg{Done: done, Total: total, Name: "delete " + de.RelPath}
+		}
+		for _, de := range dirs {
+			delPath := filepath.Join(delRoot, de.RelPath)
+			_ = delFS.Remove(delPath)
+			done++
+			progress <- diff.SyncProgressMsg{Done: done, Total: total, Name: "delete " + de.RelPath}
+		}
+
+		// Copy differing/missing files to the target side.
+		for _, de := range toCopy {
+			var srcFS, dstFS fs.FileSystem
+			var srcRoot, dstRoot string
+			if direction == "push" {
+				srcFS = localFS
+				srcRoot = localRoot
+				dstFS = remoteFS
+				dstRoot = remoteRoot
+			} else {
+				srcFS = remoteFS
+				srcRoot = remoteRoot
+				dstFS = localFS
+				dstRoot = localRoot
+			}
+
+			dstPath := filepath.Join(dstRoot, de.RelPath)
+			if de.IsDir {
+				_ = dstFS.Mkdir(dstPath, 0o755)
+			} else {
+				srcEntry := de.LocalEntry
+				if direction == "pull" {
+					srcEntry = de.RemoteEntry
+				}
+				if srcEntry != nil {
+					_ = dstFS.Mkdir(filepath.Dir(dstPath), 0o755)
+					srcPath := filepath.Join(srcRoot, de.RelPath)
+					if err := copyFile(srcFS, srcPath, dstFS, dstPath); err != nil {
+						done++
+						progress <- diff.SyncProgressMsg{Done: done, Total: total, Name: de.RelPath + " (error)"}
+						continue
+					}
+					if stat, err := srcFS.Stat(filepath.Join(srcRoot, de.RelPath)); err == nil && !stat.ModTime.IsZero() {
+						_ = dstFS.Chtimes(dstPath, stat.ModTime)
+					}
+				}
+			}
+			done++
+			progress <- diff.SyncProgressMsg{Done: done, Total: total, Name: de.RelPath}
+		}
+		close(progress)
+	}()
+
+	return m, m.listenSyncProgress()
+}
+
 func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -958,7 +1131,7 @@ func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.submitInput()
 
 		case "n":
-			if m.inputMode == "confirm-delete" || m.inputMode == "confirm-overwrite" {
+			if m.inputMode == "confirm-delete" || m.inputMode == "confirm-overwrite" || m.inputMode == "confirm-mirror" {
 				m.inputMode = ""
 				m.pendingPaste = nil
 				m.inputField.Blur()
@@ -970,6 +1143,14 @@ func (m Model) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.inputMode == "confirm-delete" {
 			if msg.String() == "y" {
 				return m.executeDelete()
+			}
+			return m, nil
+		}
+
+		if m.inputMode == "confirm-mirror" {
+			if msg.String() == "y" {
+				m.inputMode = ""
+				return m.executeMirror()
 			}
 			return m, nil
 		}
