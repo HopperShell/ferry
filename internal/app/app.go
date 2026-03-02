@@ -6,8 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
-	"os"
+"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -1462,16 +1461,6 @@ func copyFile(srcFS fs.FileSystem, srcPath string, dstFS fs.FileSystem, dstPath 
 	var perm os.FileMode = 0o644
 	if err == nil && srcStat.Mode != 0 {
 		perm = srcStat.Mode
-	}
-
-	// Skip if destination already matches source.
-	if err == nil {
-		if dstStat, dstErr := dstFS.Stat(dstPath); dstErr == nil {
-			if dstStat.Size == srcStat.Size && !srcStat.ModTime.IsZero() &&
-				math.Abs(dstStat.ModTime.Sub(srcStat.ModTime).Seconds()) < 2 {
-				return nil
-			}
-		}
 	}
 
 	var buf bytes.Buffer
