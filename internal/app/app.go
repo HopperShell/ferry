@@ -992,8 +992,8 @@ func (m Model) handleMirrorAction(action diff.MirrorAction) (tea.Model, tea.Cmd)
 	return m, nil
 }
 
-// executeMirror performs the mirror operation: copies differing files and deletes orphans.
-// When rsync is available on SSH connections, delegates to rsync --delete.
+// executeMirror performs the mirror operation over SFTP: deletes orphans then
+// copies differing/missing files, all using the existing SSH connection.
 func (m Model) executeMirror() (tea.Model, tea.Cmd) {
 	localFS := m.localPane.FS()
 	remoteFS := m.remotePane.FS()
@@ -1001,43 +1001,6 @@ func (m Model) executeMirror() (tea.Model, tea.Cmd) {
 	remoteRoot := m.syncRemoteRoot
 	direction := m.mirrorAction.Direction
 	entries := m.mirrorEntries
-
-	// Use rsync --delete when available on SSH connections.
-	if m.diffView.HasRsync() && m.backendType == "ssh" && m.conn != nil {
-		progress := make(chan diff.SyncProgressMsg, 1)
-		m.syncProgress = progress
-		m.diffView.SetSyncing("rsync mirror starting...")
-
-		host := m.conn.Host()
-		go func() {
-			rsyncProgress := make(chan string, 64)
-			errCh := make(chan error, 1)
-
-			go func() {
-				if direction == "push" {
-					errCh <- transfer.RsyncMirrorPush(localRoot, remoteRoot, host, rsyncProgress)
-				} else {
-					errCh <- transfer.RsyncMirrorPull(remoteRoot, localRoot, host, rsyncProgress)
-				}
-			}()
-
-			count := 0
-			for line := range rsyncProgress {
-				if strings.TrimSpace(line) == "" {
-					continue
-				}
-				count++
-				progress <- diff.SyncProgressMsg{Done: count, Total: 0, Name: line}
-			}
-
-			if err := <-errCh; err != nil {
-				progress <- diff.SyncProgressMsg{Done: count, Total: 0, Name: "rsync error: " + err.Error()}
-			}
-			close(progress)
-		}()
-
-		return m, m.listenSyncProgress()
-	}
 
 	// Separate into copies and deletes.
 	var toCopy []transfer.DiffEntry
@@ -1695,18 +1658,9 @@ func copyFile(srcFS fs.FileSystem, srcPath string, dstFS fs.FileSystem, dstPath 
 		_ = dstFS.Remove(tmpPath)
 		return fmt.Errorf("write: %w", err)
 	}
-	// Some SFTP servers reject rename-over-existing; remove dest first.
-	_ = dstFS.Remove(dstPath)
 	if err := dstFS.Rename(tmpPath, dstPath); err != nil {
-		// Rename still failed — write directly as fallback.
 		_ = dstFS.Remove(tmpPath)
-		buf.Reset()
-		if err := srcFS.Read(srcPath, &buf); err != nil {
-			return fmt.Errorf("read: %w", err)
-		}
-		if err := dstFS.Write(dstPath, &buf, perm); err != nil {
-			return fmt.Errorf("write: %w", err)
-		}
+		return fmt.Errorf("rename temp: %w", err)
 	}
 	return nil
 }

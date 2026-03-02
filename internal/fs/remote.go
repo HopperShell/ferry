@@ -125,6 +125,12 @@ func (r *RemoteFS) Rename(old, new string) error {
 	if r.client == nil {
 		return errNoClient
 	}
+	// PosixRename uses the posix-rename@openssh.com extension which
+	// atomically overwrites the destination. Standard SSH_FXP_RENAME
+	// fails with SSH_FX_FAILURE on many servers when the dest exists.
+	if err := r.client.PosixRename(old, new); err == nil {
+		return nil
+	}
 	return r.client.Rename(old, new)
 }
 
