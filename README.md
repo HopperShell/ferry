@@ -39,6 +39,14 @@ Ferry is a terminal-based file transfer tool built for engineers who live in the
 go install github.com/HopperShell/ferry/cmd/ferry@latest
 ```
 
+Make sure `$GOPATH/bin` (usually `~/go/bin`) is in your `PATH`. Add this to your shell rc file (`~/.bashrc`, `~/.zshrc`, etc.):
+
+```sh
+export PATH="$HOME/go/bin:$PATH"
+```
+
+Then restart your shell or run `source ~/.zshrc` (or whichever rc file you use).
+
 ### Binary releases
 
 Download a prebuilt binary from the [Releases](https://github.com/HopperShell/ferry/releases) page.
