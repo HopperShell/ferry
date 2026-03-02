@@ -96,6 +96,9 @@ func (h *HelpOverlay) View() string {
 		entry("?", "This help"),
 		entry("Esc", "Close panel"),
 		entry("q", "Quit"),
+		"",
+		headerStyle.Render("Sync View"),
+		entry("M+→/←", "Mirror push/pull"),
 	}
 
 	// Pad columns to same height.

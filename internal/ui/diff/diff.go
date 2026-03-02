@@ -29,6 +29,11 @@ type SyncAction struct {
 	Direction string // "push" or "pull"
 }
 
+// MirrorAction requests a full mirror in the given direction.
+type MirrorAction struct {
+	Direction string // "push" or "pull"
+}
+
 // SyncProgressMsg updates the transfer progress counter in the diff view.
 type SyncProgressMsg struct {
 	Done  int
@@ -53,10 +58,11 @@ type Model struct {
 	height     int
 	hasRsync   bool
 	scope      string // what path is being compared (shown in title)
-	syncing     bool   // true while a transfer is in progress
-	syncStatus  string // status message during sync
-	syncDone    int    // completed items
-	syncTotal   int    // total items to transfer
+	syncing       bool   // true while a transfer is in progress
+	syncStatus    string // status message during sync
+	syncDone      int    // completed items
+	syncTotal     int    // total items to transfer
+	mirrorPending bool   // true after pressing M, waiting for direction
 }
 
 // New creates a new empty diff view model.
@@ -145,6 +151,11 @@ func (m Model) diffEntries() []transfer.DiffEntry {
 	return out
 }
 
+// DiffEntries returns all entries (including same).
+func (m Model) DiffEntries() []transfer.DiffEntry {
+	return m.entries
+}
+
 // sameCount returns how many entries are in sync.
 func (m Model) sameCount() int {
 	n := 0
@@ -164,6 +175,27 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle mirror-pending state: waiting for direction after M.
+		if m.mirrorPending {
+			switch msg.String() {
+			case "right", "l":
+				m.mirrorPending = false
+				return m, func() tea.Msg {
+					return MirrorAction{Direction: "push"}
+				}
+			case "left", "h":
+				m.mirrorPending = false
+				return m, func() tea.Msg {
+					return MirrorAction{Direction: "pull"}
+				}
+			case "esc":
+				m.mirrorPending = false
+			default:
+				m.mirrorPending = false
+			}
+			return m, nil
+		}
+
 		visible := m.diffEntries()
 		switch msg.String() {
 		case "j", "down":
@@ -192,6 +224,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			for i := range visible {
 				m.selected[i] = true
 			}
+
+		case "M":
+			m.mirrorPending = true
+			return m, nil
 
 		case "right", "l":
 			sel := m.selectedFromVisible(visible)
@@ -315,10 +351,13 @@ func (m Model) View() string {
 	footerStyle := lipgloss.NewStyle().Foreground(theme.Dim)
 	if m.syncing {
 		lines = append(lines, footerStyle.Render("  Transferring..."))
+	} else if m.mirrorPending {
+		lines = append(lines, lipgloss.NewStyle().Foreground(theme.Amber).Bold(true).Render("  Press → to mirror-push to remote, ← to mirror-pull to local, Esc to cancel"))
 	} else {
 		pushHint := lipgloss.NewStyle().Foreground(theme.Cyan).Render("→ push to remote")
 		pullHint := lipgloss.NewStyle().Foreground(theme.Amber).Render("← pull to local")
-		footer := footerStyle.Render("  j/k:nav  Space:select  a:select all  ") + pushHint + footerStyle.Render("  ") + pullHint + footerStyle.Render("  Esc:back")
+		mirrorHint := footerStyle.Render("M+→/← mirror")
+		footer := footerStyle.Render("  j/k:nav  Space:select  a:all  ") + pushHint + footerStyle.Render("  ") + pullHint + footerStyle.Render("  ") + mirrorHint + footerStyle.Render("  Esc:back")
 		lines = append(lines, footer)
 	}
 
