@@ -160,6 +160,9 @@ func walkFSInto(ctx context.Context, filesystem fs.FileSystem, root string, pref
 		if len(result) >= maxWalkFiles {
 			return nil // cap reached
 		}
+		if entry.IsDir && fs.SkipDirs[entry.Name] {
+			continue
+		}
 
 		rel := path.Join(prefix, entry.Name)
 		result[rel] = entry
