@@ -566,6 +566,24 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// When the active pane is capturing text input (search or find mode),
+	// forward key events directly to the pane, skipping app-level bindings.
+	if _, isKey := msg.(tea.KeyMsg); isKey {
+		active := m.localPane.InputActive()
+		if m.activePane == 1 {
+			active = m.remotePane.InputActive()
+		}
+		if active {
+			var cmd tea.Cmd
+			if m.activePane == 0 {
+				m.localPane, cmd = m.localPane.Update(msg)
+			} else {
+				m.remotePane, cmd = m.remotePane.Update(msg)
+			}
+			return m, cmd
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		key := msg.String()

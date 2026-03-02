@@ -134,6 +134,13 @@ func (m *Model) SetActive(active bool) {
 	m.active = active
 }
 
+// InputActive reports whether the pane is in a mode that captures text input
+// (e.g. search or find). The parent should skip app-level key handling when
+// this returns true.
+func (m Model) InputActive() bool {
+	return m.search || m.find
+}
+
 // CurrentEntry returns the entry under the cursor, or nil.
 func (m Model) CurrentEntry() *fs.Entry {
 	idx := m.visibleIndex()
