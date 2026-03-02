@@ -326,6 +326,8 @@ func (m Model) View() string {
 		}
 		bar := strings.Repeat("\u2588", filled) + strings.Repeat("\u2591", barWidth-filled)
 		titleText = fmt.Sprintf(" Sync%s  %s %d/%d  %s", scopeLabel, bar, m.syncDone, m.syncTotal, m.syncStatus)
+	} else if m.syncing && m.syncDone > 0 {
+		titleText = fmt.Sprintf(" Sync%s  %d files  %s", scopeLabel, m.syncDone, m.syncStatus)
 	} else if m.syncing {
 		titleText = fmt.Sprintf(" Sync%s  %s", scopeLabel, m.syncStatus)
 	}
