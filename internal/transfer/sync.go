@@ -220,6 +220,34 @@ func RsyncPull(remotePath, localPath, host string, progress chan<- string) error
 	return runRsync(cmd, progress)
 }
 
+// RsyncMirrorPush syncs local->remote using rsync with --delete, making remote
+// an exact mirror of local. The channel is closed when rsync completes.
+func RsyncMirrorPush(localPath, remotePath, host string, progress chan<- string) error {
+	defer close(progress)
+
+	cmd := exec.Command("rsync", "-avz", "--delete", "--progress",
+		"-e", "ssh",
+		localPath+"/",
+		fmt.Sprintf("%s:%s/", host, remotePath),
+	)
+
+	return runRsync(cmd, progress)
+}
+
+// RsyncMirrorPull syncs remote->local using rsync with --delete, making local
+// an exact mirror of remote. The channel is closed when rsync completes.
+func RsyncMirrorPull(remotePath, localPath, host string, progress chan<- string) error {
+	defer close(progress)
+
+	cmd := exec.Command("rsync", "-avz", "--delete", "--progress",
+		"-e", "ssh",
+		fmt.Sprintf("%s:%s/", host, remotePath),
+		localPath+"/",
+	)
+
+	return runRsync(cmd, progress)
+}
+
 // runRsync executes an rsync command, streaming stdout lines to the progress channel.
 func runRsync(cmd *exec.Cmd, progress chan<- string) error {
 	stdout, err := cmd.StdoutPipe()
