@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	s3svc "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -907,47 +909,69 @@ func (m Model) handleSyncAction(action diff.SyncAction) (tea.Model, tea.Cmd) {
 	m.diffView.SetSyncing(fmt.Sprintf("0/%d", total))
 
 	go func() {
-		for i, de := range diffEntries {
-			var srcFS, dstFS fs.FileSystem
-			var srcRoot, dstRoot string
+		var srcFS, dstFS fs.FileSystem
+		var srcRoot, dstRoot string
+		if direction == "push" {
+			srcFS = localFS
+			srcRoot = localRoot
+			dstFS = remoteFS
+			dstRoot = remoteRoot
+		} else {
+			srcFS = remoteFS
+			srcRoot = remoteRoot
+			dstFS = localFS
+			dstRoot = localRoot
+		}
 
-			if direction == "push" {
-				srcFS = localFS
-				srcRoot = localRoot
-				dstFS = remoteFS
-				dstRoot = remoteRoot
-			} else {
-				srcFS = remoteFS
-				srcRoot = remoteRoot
-				dstFS = localFS
-				dstRoot = localRoot
-			}
-
+		// Create directories first (must be sequential to ensure parents exist).
+		var fileEntries []transfer.DiffEntry
+		var done int32
+		for _, de := range diffEntries {
 			dstPath := filepath.Join(dstRoot, de.RelPath)
-
 			if de.IsDir {
 				_ = dstFS.Mkdir(dstPath, 0o755)
+				n := int(atomic.AddInt32(&done, 1))
+				progress <- diff.SyncProgressMsg{Done: n, Total: total, Name: de.RelPath}
 			} else {
-				srcEntry := de.LocalEntry
-				if direction == "pull" {
-					srcEntry = de.RemoteEntry
-				}
-				if srcEntry != nil {
-					_ = dstFS.Mkdir(filepath.Dir(dstPath), 0o755)
-					srcPath := filepath.Join(srcRoot, de.RelPath)
-					if err := copyFile(srcFS, srcPath, dstFS, dstPath); err != nil {
-						// Continue on error — report in progress name.
-						progress <- diff.SyncProgressMsg{Done: i + 1, Total: total, Name: fmt.Sprintf("%s (%v)", de.RelPath, err)}
-						continue
-					}
-					if stat, err := srcFS.Stat(srcPath); err == nil && !stat.ModTime.IsZero() {
-						_ = dstFS.Chtimes(dstPath, stat.ModTime)
-					}
-				}
+				fileEntries = append(fileEntries, de)
+			}
+		}
+
+		// Copy files concurrently.
+		const syncWorkers = 4
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, syncWorkers)
+		for _, de := range fileEntries {
+			srcEntry := de.LocalEntry
+			if direction == "pull" {
+				srcEntry = de.RemoteEntry
+			}
+			if srcEntry == nil {
+				n := int(atomic.AddInt32(&done, 1))
+				progress <- diff.SyncProgressMsg{Done: n, Total: total, Name: de.RelPath}
+				continue
 			}
 
-			progress <- diff.SyncProgressMsg{Done: i + 1, Total: total, Name: de.RelPath}
+			sem <- struct{}{}
+			wg.Add(1)
+			go func(de transfer.DiffEntry) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				dstPath := filepath.Join(dstRoot, de.RelPath)
+				_ = dstFS.Mkdir(filepath.Dir(dstPath), 0o755)
+				srcPath := filepath.Join(srcRoot, de.RelPath)
+				name := de.RelPath
+				if err := copyFile(srcFS, srcPath, dstFS, dstPath); err != nil {
+					name = fmt.Sprintf("%s (%v)", de.RelPath, err)
+				} else if stat, err := srcFS.Stat(srcPath); err == nil && !stat.ModTime.IsZero() {
+					_ = dstFS.Chtimes(dstPath, stat.ModTime)
+				}
+				n := int(atomic.AddInt32(&done, 1))
+				progress <- diff.SyncProgressMsg{Done: n, Total: total, Name: name}
+			}(de)
 		}
+		wg.Wait()
 		close(progress)
 	}()
 
@@ -1073,45 +1097,69 @@ func (m Model) executeMirror() (tea.Model, tea.Cmd) {
 		}
 
 		// Copy differing/missing files to the target side.
-		for _, de := range toCopy {
-			var srcFS, dstFS fs.FileSystem
-			var srcRoot, dstRoot string
-			if direction == "push" {
-				srcFS = localFS
-				srcRoot = localRoot
-				dstFS = remoteFS
-				dstRoot = remoteRoot
-			} else {
-				srcFS = remoteFS
-				srcRoot = remoteRoot
-				dstFS = localFS
-				dstRoot = localRoot
-			}
+		var srcFS, dstFS fs.FileSystem
+		var srcRoot, dstRoot string
+		if direction == "push" {
+			srcFS = localFS
+			srcRoot = localRoot
+			dstFS = remoteFS
+			dstRoot = remoteRoot
+		} else {
+			srcFS = remoteFS
+			srcRoot = remoteRoot
+			dstFS = localFS
+			dstRoot = localRoot
+		}
 
+		// Create directories first (sequential to ensure parents exist).
+		var fileCopies []transfer.DiffEntry
+		doneAtomic := int32(done)
+		for _, de := range toCopy {
 			dstPath := filepath.Join(dstRoot, de.RelPath)
 			if de.IsDir {
 				_ = dstFS.Mkdir(dstPath, 0o755)
+				n := int(atomic.AddInt32(&doneAtomic, 1))
+				progress <- diff.SyncProgressMsg{Done: n, Total: total, Name: de.RelPath}
 			} else {
-				srcEntry := de.LocalEntry
-				if direction == "pull" {
-					srcEntry = de.RemoteEntry
-				}
-				if srcEntry != nil {
-					_ = dstFS.Mkdir(filepath.Dir(dstPath), 0o755)
-					srcPath := filepath.Join(srcRoot, de.RelPath)
-					if err := copyFile(srcFS, srcPath, dstFS, dstPath); err != nil {
-						done++
-						progress <- diff.SyncProgressMsg{Done: done, Total: total, Name: fmt.Sprintf("%s (%v)", de.RelPath, err)}
-						continue
-					}
-					if stat, err := srcFS.Stat(filepath.Join(srcRoot, de.RelPath)); err == nil && !stat.ModTime.IsZero() {
-						_ = dstFS.Chtimes(dstPath, stat.ModTime)
-					}
-				}
+				fileCopies = append(fileCopies, de)
 			}
-			done++
-			progress <- diff.SyncProgressMsg{Done: done, Total: total, Name: de.RelPath}
 		}
+
+		// Copy files concurrently.
+		const mirrorWorkers = 4
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, mirrorWorkers)
+		for _, de := range fileCopies {
+			srcEntry := de.LocalEntry
+			if direction == "pull" {
+				srcEntry = de.RemoteEntry
+			}
+			if srcEntry == nil {
+				n := int(atomic.AddInt32(&doneAtomic, 1))
+				progress <- diff.SyncProgressMsg{Done: n, Total: total, Name: de.RelPath}
+				continue
+			}
+
+			sem <- struct{}{}
+			wg.Add(1)
+			go func(de transfer.DiffEntry) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				dstPath := filepath.Join(dstRoot, de.RelPath)
+				_ = dstFS.Mkdir(filepath.Dir(dstPath), 0o755)
+				srcPath := filepath.Join(srcRoot, de.RelPath)
+				name := de.RelPath
+				if err := copyFile(srcFS, srcPath, dstFS, dstPath); err != nil {
+					name = fmt.Sprintf("%s (%v)", de.RelPath, err)
+				} else if stat, err := srcFS.Stat(srcPath); err == nil && !stat.ModTime.IsZero() {
+					_ = dstFS.Chtimes(dstPath, stat.ModTime)
+				}
+				n := int(atomic.AddInt32(&doneAtomic, 1))
+				progress <- diff.SyncProgressMsg{Done: n, Total: total, Name: name}
+			}(de)
+		}
+		wg.Wait()
 		close(progress)
 	}()
 
