@@ -10,6 +10,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/HopperShell/ferry/internal/fs"
@@ -42,6 +43,8 @@ const (
 	maxWalkDepth = 10
 	// maxWalkFiles limits total files enumerated per side to keep compare fast.
 	maxWalkFiles = 5000
+	// walkWorkers is the number of concurrent SFTP ReadDir calls during remote walks.
+	walkWorkers = 12
 	// localWalkTimeout is the max time for walking the local filesystem.
 	localWalkTimeout = 10 * time.Second
 	// remoteWalkTimeout is the max time for walking the remote filesystem.
@@ -52,22 +55,35 @@ const (
 // Compare walks both FileSystems from the given root paths and returns a flat
 // list of DiffEntries representing the unified view.
 func Compare(localFS fs.FileSystem, localRoot string, remoteFS fs.FileSystem, remoteRoot string) ([]DiffEntry, error) {
-	// Walk each side with its own timeout so a slow remote doesn't get
-	// starved by the local walk consuming the shared budget.
-	localCtx, localCancel := context.WithTimeout(context.Background(), localWalkTimeout)
-	defer localCancel()
+	var (
+		localMap  map[string]fs.Entry
+		remoteMap map[string]fs.Entry
+		localErr  error
+		remoteErr error
+		wg        sync.WaitGroup
+	)
 
-	// Treat non-existent directories as empty so sync can create them.
-	localMap, err := walkFS(localCtx, localFS, localRoot, "", 0)
-	if err != nil {
+	// Walk both sides concurrently, each with its own timeout.
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), localWalkTimeout)
+		defer cancel()
+		localMap, localErr = walkFS(ctx, localFS, localRoot, "", 0)
+	}()
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), remoteWalkTimeout)
+		defer cancel()
+		remoteMap, remoteErr = concurrentWalkFS(ctx, remoteFS, remoteRoot)
+	}()
+	wg.Wait()
+
+	// Treat non-existent or errored directories as empty so sync can create them.
+	if localErr != nil {
 		localMap = make(map[string]fs.Entry)
 	}
-
-	remoteCtx, remoteCancel := context.WithTimeout(context.Background(), remoteWalkTimeout)
-	defer remoteCancel()
-
-	remoteMap, err := walkFS(remoteCtx, remoteFS, remoteRoot, "", 0)
-	if err != nil {
+	if remoteErr != nil {
 		remoteMap = make(map[string]fs.Entry)
 	}
 
@@ -186,6 +202,82 @@ func walkFSInto(ctx context.Context, filesystem fs.FileSystem, root string, pref
 	}
 
 	return nil
+}
+
+// concurrentWalkFS walks a filesystem tree using multiple goroutines to issue
+// List calls in parallel. A semaphore limits concurrency to walkWorkers so we
+// don't overwhelm the SFTP connection. This dramatically reduces wall-clock
+// time for remote walks where each ReadDir is a network round-trip.
+func concurrentWalkFS(ctx context.Context, filesystem fs.FileSystem, root string) (map[string]fs.Entry, error) {
+	result := make(map[string]fs.Entry)
+	var mu sync.Mutex
+	sem := make(chan struct{}, walkWorkers)
+	var wg sync.WaitGroup
+
+	var walk func(dir, prefix string, depth int)
+	walk = func(dir, prefix string, depth int) {
+		defer wg.Done()
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		mu.Lock()
+		if len(result) >= maxWalkFiles {
+			mu.Unlock()
+			return
+		}
+		mu.Unlock()
+
+		// Acquire semaphore to limit concurrent List calls.
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		entries, err := filesystem.List(dir)
+		<-sem
+
+		if err != nil {
+			return
+		}
+
+		mu.Lock()
+		var subdirs []struct {
+			dir, prefix string
+			depth       int
+		}
+		for _, entry := range entries {
+			if len(result) >= maxWalkFiles {
+				break
+			}
+			if entry.IsDir && fs.SkipDirs[entry.Name] {
+				continue
+			}
+			rel := path.Join(prefix, entry.Name)
+			result[rel] = entry
+			if entry.IsDir && depth < maxWalkDepth {
+				subdirs = append(subdirs, struct {
+					dir, prefix string
+					depth       int
+				}{entry.Path, rel, depth + 1})
+			}
+		}
+		mu.Unlock()
+
+		for _, sub := range subdirs {
+			wg.Add(1)
+			go walk(sub.dir, sub.prefix, sub.depth)
+		}
+	}
+
+	wg.Add(1)
+	go walk(root, "", 0)
+	wg.Wait()
+
+	return result, nil
 }
 
 // HasRsync checks if rsync is available on the remote host via SSH.
