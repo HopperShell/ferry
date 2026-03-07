@@ -41,6 +41,9 @@ type SyncProgressMsg struct {
 	Name  string // item just completed
 }
 
+// SyncDoneMsg signals that all transfers finished and a re-compare should start.
+type SyncDoneMsg struct{}
+
 // SyncRefreshMsg carries refreshed entries after all sync transfers complete.
 type SyncRefreshMsg struct {
 	Entries  []transfer.DiffEntry
@@ -58,6 +61,7 @@ type Model struct {
 	height     int
 	hasRsync   bool
 	scope      string // what path is being compared (shown in title)
+	comparing     bool   // true while Compare is running
 	syncing       bool   // true while a transfer is in progress
 	syncStatus    string // status message during sync
 	syncDone      int    // completed items
@@ -73,6 +77,11 @@ func New() Model {
 	}
 }
 
+// SetComparing marks the view as busy running a directory comparison.
+func (m *Model) SetComparing() {
+	m.comparing = true
+}
+
 // SetEntries replaces the diff entries and resets navigation.
 func (m *Model) SetEntries(entries []transfer.DiffEntry, hasRsync bool) {
 	m.hasRsync = hasRsync
@@ -80,6 +89,7 @@ func (m *Model) SetEntries(entries []transfer.DiffEntry, hasRsync bool) {
 	m.offset = 0
 	m.selected = make(map[int]bool)
 	m.entries = entries
+	m.comparing = false
 	m.syncing = false
 	m.syncStatus = ""
 }
@@ -176,8 +186,8 @@ func (m Model) sameCount() int {
 
 // Update handles keyboard input for the diff view.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
-	if m.syncing {
-		return m, nil // ignore input while syncing
+	if m.syncing || m.comparing {
+		return m, nil // ignore input while syncing or comparing
 	}
 
 	switch msg := msg.(type) {
@@ -302,6 +312,11 @@ func (m Model) View() string {
 	scopeLabel := ""
 	if m.scope != "" {
 		scopeLabel = " " + m.scope
+	}
+
+	if m.comparing {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+			lipgloss.NewStyle().Foreground(theme.Cyan).Render("⠋ Comparing directories..."))
 	}
 
 	if len(visible) == 0 && !m.syncing {

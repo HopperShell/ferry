@@ -295,6 +295,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.diffView.SetSyncProgress(msg.Done, msg.Total, msg.Name)
 		return m, m.listenSyncProgress()
 
+	case diff.SyncDoneMsg:
+		m.diffView.SetComparing()
+		m.syncProgress = nil
+		localFS := m.localPane.FS()
+		remoteFS := m.remotePane.FS()
+		localRoot := m.syncLocalRoot
+		remoteRoot := m.syncRemoteRoot
+		hasRsync := m.diffView.HasRsync()
+		return m, func() tea.Msg {
+			entries, err := transfer.Compare(localFS, localRoot, remoteFS, remoteRoot)
+			return diff.SyncRefreshMsg{Entries: entries, HasRsync: hasRsync, Err: err}
+		}
+
 	case diff.SyncRefreshMsg:
 		if msg.Err != nil {
 			m.statusBar.SetError(fmt.Sprintf("Sync error: %v", msg.Err))
@@ -847,7 +860,9 @@ func (m Model) startSync() (tea.Model, tea.Cmd) {
 	m.syncRemoteRoot = remotePath
 	m.diffView.SetScope(scope)
 
-	m.statusBar.SetError(fmt.Sprintf("Comparing %s ...", scope))
+	m.state = stateSync
+	m.diffView.SetComparing()
+	m.diffView.SetSize(m.width, m.height)
 
 	return m, func() tea.Msg {
 		entries, err := transfer.Compare(localFS, localPath, remoteFS, remotePath)
@@ -1642,24 +1657,18 @@ func listenForProgress(ch <-chan transfer.ProgressEvent) tea.Cmd {
 }
 
 // listenSyncProgress reads the next sync progress event from the channel.
-// When closed (all transfers done), re-runs Compare and returns SyncRefreshMsg.
+// When closed (all transfers done), sends SyncDoneMsg so the UI can show
+// a loading indicator before the re-compare starts.
 func (m Model) listenSyncProgress() tea.Cmd {
 	ch := m.syncProgress
 	if ch == nil {
 		return nil
 	}
-	localFS := m.localPane.FS()
-	remoteFS := m.remotePane.FS()
-	localRoot := m.syncLocalRoot
-	remoteRoot := m.syncRemoteRoot
-	hasRsync := m.diffView.HasRsync()
 
 	return func() tea.Msg {
 		event, ok := <-ch
 		if !ok {
-			// All done — re-run Compare for final state.
-			entries, err := transfer.Compare(localFS, localRoot, remoteFS, remoteRoot)
-			return diff.SyncRefreshMsg{Entries: entries, HasRsync: hasRsync, Err: err}
+			return diff.SyncDoneMsg{}
 		}
 		return event
 	}
