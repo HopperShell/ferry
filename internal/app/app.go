@@ -2,7 +2,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -1705,15 +1704,23 @@ func copyFile(srcFS fs.FileSystem, srcPath string, dstFS fs.FileSystem, dstPath 
 		perm = srcStat.Mode
 	}
 
-	var buf bytes.Buffer
-	if err := srcFS.Read(srcPath, &buf); err != nil {
-		return fmt.Errorf("read: %w", err)
-	}
+	pr, pw := io.Pipe()
+
+	errCh := make(chan error, 1)
+	go func() {
+		err := srcFS.Read(srcPath, pw)
+		pw.CloseWithError(err) // unblocks the reader; nil means normal EOF
+		errCh <- err
+	}()
 
 	tmpPath := dstPath + ".ferry-tmp"
-	if err := dstFS.Write(tmpPath, &buf, perm); err != nil {
+	if err := dstFS.Write(tmpPath, pr, perm); err != nil {
 		_ = dstFS.Remove(tmpPath)
 		return fmt.Errorf("write: %w", err)
+	}
+	if err := <-errCh; err != nil {
+		_ = dstFS.Remove(tmpPath)
+		return fmt.Errorf("read: %w", err)
 	}
 	if err := dstFS.Rename(tmpPath, dstPath); err != nil {
 		_ = dstFS.Remove(tmpPath)
