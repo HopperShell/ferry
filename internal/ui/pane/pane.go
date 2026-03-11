@@ -84,7 +84,10 @@ type Model struct {
 	height      int
 	err         error
 	anchor      int      // for range select (V)
-	lastKey     string   // for gg detection
+	lastKey       string    // for gg detection
+	lastClickTime time.Time // for double-click detection
+	lastClickRow  int       // row of last click for double-click
+	dragStart     int       // starting cursor position for drag-select (-1 = not dragging)
 	active      bool     // whether this pane is the focused pane
 	sortMode    SortMode // current sort order
 
@@ -120,6 +123,7 @@ func New(filesystem fs.FileSystem, label string) Model {
 		searchInput: ti,
 		findInput:   fi,
 		anchor:      -1,
+		dragStart:   -1,
 	}
 }
 
@@ -259,6 +263,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		m.err = msg.err
 		return m, nil
+
+	case tea.MouseMsg:
+		if m.find {
+			return m.updateFindMouse(msg)
+		}
+		return m.updateMouse(msg)
 
 	case tea.KeyMsg:
 		if m.find {
@@ -569,6 +579,140 @@ func (m *Model) ensureFindVisible() {
 	if m.findCursor >= m.findOffset+lh {
 		m.findOffset = m.findCursor - lh + 1
 	}
+}
+
+// ContextMenuMsg is emitted on right-click to request a context menu.
+type ContextMenuMsg struct {
+	X, Y int
+}
+
+// mouseToRow converts a mouse Y coordinate to a visible file list row index.
+// Returns -1 if the click is outside the file list area.
+func (m Model) mouseToRow(y int) int {
+	// Pane layout: border(1) + header(1) + file rows + footer(1) + border(1)
+	// File list starts at y=2 (border top + header), each row is 1 line.
+	listStart := 2
+	row := y - listStart + m.offset
+	if row < 0 || row >= m.visibleCount() {
+		return -1
+	}
+	return row
+}
+
+func (m Model) updateMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
+	switch msg.Action {
+	case tea.MouseActionPress:
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			if m.cursor > 0 {
+				m.cursor--
+				m.ensureVisible()
+			}
+			return m, nil
+
+		case tea.MouseButtonWheelDown:
+			if m.cursor < m.visibleCount()-1 {
+				m.cursor++
+				m.ensureVisible()
+			}
+			return m, nil
+
+		case tea.MouseButtonLeft:
+			row := m.mouseToRow(msg.Y)
+			if row < 0 {
+				return m, nil
+			}
+
+			now := time.Now()
+			isDoubleClick := row == m.lastClickRow && now.Sub(m.lastClickTime) < 400*time.Millisecond
+			m.lastClickTime = now
+			m.lastClickRow = row
+
+			if isDoubleClick {
+				m.cursor = row
+				m.ensureVisible()
+				if e := m.CurrentEntry(); e != nil {
+					if e.IsDir {
+						target := e.Path
+						m.selected = make(map[string]bool)
+						m.anchor = -1
+						return m, m.listDir(target)
+					}
+					return m, func() tea.Msg {
+						return TransferRequestMsg{Entries: []fs.Entry{*e}}
+					}
+				}
+				return m, nil
+			}
+
+			// Single click: move cursor.
+			m.cursor = row
+			m.dragStart = row
+			m.ensureVisible()
+			return m, nil
+
+		case tea.MouseButtonRight:
+			row := m.mouseToRow(msg.Y)
+			if row < 0 {
+				return m, nil
+			}
+			m.cursor = row
+			m.ensureVisible()
+			return m, func() tea.Msg {
+				return ContextMenuMsg{X: msg.X, Y: msg.Y}
+			}
+		}
+
+	case tea.MouseActionMotion:
+		if m.dragStart >= 0 {
+			row := m.mouseToRow(msg.Y)
+			if row < 0 {
+				return m, nil
+			}
+			lo, hi := m.dragStart, row
+			if lo > hi {
+				lo, hi = hi, lo
+			}
+			m.selected = make(map[string]bool)
+			for i := lo; i <= hi; i++ {
+				idx := m.mapIndex(i)
+				if idx >= 0 && idx < len(m.entries) {
+					m.selected[m.entries[idx].Path] = true
+				}
+			}
+			m.cursor = row
+			m.ensureVisible()
+			return m, nil
+		}
+
+	case tea.MouseActionRelease:
+		m.dragStart = -1
+	}
+
+	return m, nil
+}
+
+func (m Model) updateFindMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
+	switch {
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelUp:
+		if m.findCursor > 0 {
+			m.findCursor--
+			m.ensureFindVisible()
+		}
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelDown:
+		if m.findCursor < len(m.findFiltered)-1 {
+			m.findCursor++
+			m.ensureFindVisible()
+		}
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
+		listStart := 2
+		row := msg.Y - listStart + m.findOffset
+		if row >= 0 && row < len(m.findFiltered) {
+			m.findCursor = row
+			m.ensureFindVisible()
+		}
+	}
+	return m, nil
 }
 
 // View renders the pane.
