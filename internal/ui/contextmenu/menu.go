@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/HopperShell/ferry/internal/ui/theme"
 )
@@ -46,13 +47,13 @@ func (m *Model) Show(x, y int, items []Item) {
 	m.visible = true
 
 	// Clamp position so menu doesn't overflow terminal.
-	menuWidth := m.menuWidth()
-	menuHeight := len(items) + 2 // items + border
-	if x+menuWidth > m.width {
-		x = m.width - menuWidth
+	menuW := m.renderedWidth()
+	menuH := m.renderedHeight()
+	if x+menuW > m.width {
+		x = m.width - menuW
 	}
-	if y+menuHeight > m.height {
-		y = m.height - menuHeight
+	if y+menuH > m.height {
+		y = m.height - menuH
 	}
 	if x < 0 {
 		x = 0
@@ -121,8 +122,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case tea.MouseMsg:
 		switch {
 		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
-			menuW := m.menuWidth()
-			menuH := len(m.items) + 2
+			menuW := m.renderedWidth()
+			menuH := m.renderedHeight()
 			if msg.X >= m.x && msg.X < m.x+menuW && msg.Y >= m.y && msg.Y < m.y+menuH {
 				row := msg.Y - m.y - 1 // -1 for top border
 				if row >= 0 && row < len(m.items) {
@@ -149,13 +150,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// View renders the context menu as a positioned overlay.
-// It returns a full-screen string with the menu placed at (m.x, m.y).
-func (m Model) View() string {
-	if !m.visible || len(m.items) == 0 {
-		return ""
-	}
-
+// renderBox builds the styled menu box and returns it along with its rendered dimensions.
+func (m Model) renderBox() (box string, boxW, boxH int) {
 	var rows []string
 	itemWidth := m.menuWidth() - 4 // inner width (minus border + padding)
 	for i, item := range m.items {
@@ -179,39 +175,70 @@ func (m Model) View() string {
 	}
 
 	content := strings.Join(rows, "\n")
-	box := lipgloss.NewStyle().
+	box = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(theme.Cyan).
 		Render(content)
 
-	// Position the menu at (m.x, m.y) within the terminal.
-	if m.width > 0 && m.height > 0 {
-		// Build a full-screen output with the box at the right position.
-		boxLines := strings.Split(box, "\n")
-		boxH := len(boxLines)
-		boxW := 0
-		for _, l := range boxLines {
-			if w := lipgloss.Width(l); w > boxW {
-				boxW = w
-			}
+	boxLines := strings.Split(box, "\n")
+	boxH = len(boxLines)
+	for _, l := range boxLines {
+		if w := lipgloss.Width(l); w > boxW {
+			boxW = w
+		}
+	}
+	return box, boxW, boxH
+}
+
+// renderedWidth returns the actual rendered width of the menu box (including borders).
+func (m Model) renderedWidth() int {
+	_, w, _ := m.renderBox()
+	return w
+}
+
+// renderedHeight returns the actual rendered height of the menu box (including borders).
+func (m Model) renderedHeight() int {
+	_, _, h := m.renderBox()
+	return h
+}
+
+// Overlay composites the context menu on top of a base view using ANSI-aware
+// string splicing. Each line of the base that intersects the menu box is split
+// into left | menu | right using ansi.Truncate and ansi.TruncateLeft so that
+// escape codes are preserved correctly.
+func (m Model) Overlay(base string) string {
+	if !m.visible || len(m.items) == 0 {
+		return base
+	}
+
+	box, _, boxH := m.renderBox()
+	boxLines := strings.Split(box, "\n")
+	baseLines := strings.Split(base, "\n")
+
+	for len(baseLines) < m.height {
+		baseLines = append(baseLines, "")
+	}
+
+	for i := 0; i < boxH && m.y+i < len(baseLines); i++ {
+		bl := boxLines[i]
+		blW := lipgloss.Width(bl)
+		row := m.y + i
+		baseLine := baseLines[row]
+
+		// Left: first m.x columns of the base line (ANSI-aware).
+		left := ansi.Truncate(baseLine, m.x, "")
+
+		// Pad left if base line is shorter than m.x.
+		leftW := lipgloss.Width(left)
+		if leftW < m.x {
+			left += strings.Repeat(" ", m.x-leftW)
 		}
 
-		var output []string
-		for row := 0; row < m.height; row++ {
-			if row >= m.y && row < m.y+boxH {
-				boxLine := boxLines[row-m.y]
-				leftPad := strings.Repeat(" ", m.x)
-				rightPad := ""
-				remaining := m.width - m.x - lipgloss.Width(boxLine)
-				if remaining > 0 {
-					rightPad = strings.Repeat(" ", remaining)
-				}
-				output = append(output, leftPad+boxLine+rightPad)
-			} else {
-				output = append(output, strings.Repeat(" ", m.width))
-			}
-		}
-		return strings.Join(output, "\n")
+		// Right: everything past m.x + menu width in the base line.
+		right := ansi.TruncateLeft(baseLine, m.x+blW, "")
+
+		baseLines[row] = left + bl + right
 	}
-	return box
+
+	return strings.Join(baseLines, "\n")
 }

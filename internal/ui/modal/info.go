@@ -56,8 +56,8 @@ func (p *InfoPanel) Height() int {
 	if !p.visible || p.entry == nil {
 		return 0
 	}
-	// 8 rows of content + 2 for top/bottom border
-	return 10
+	// 1 title ("File Info") + 8 data rows + 2 for top/bottom border
+	return 11
 }
 
 // View renders the info panel.
