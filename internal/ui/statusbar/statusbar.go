@@ -50,6 +50,11 @@ func (s *StatusBar) SetError(msg string) {
 	s.error = msg
 }
 
+// HasError returns whether the status bar is currently showing an error.
+func (s *StatusBar) HasError() bool {
+	return s.error != ""
+}
+
 // SetWidth sets the available width for the status bar.
 func (s *StatusBar) SetWidth(width int) {
 	s.width = width

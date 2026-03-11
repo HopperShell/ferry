@@ -99,6 +99,13 @@ func (h *HelpOverlay) View() string {
 		"",
 		headerStyle.Render("Sync View"),
 		entry("M+→/←", "Mirror push/pull"),
+		"",
+		headerStyle.Render("Mouse"),
+		entry("Click", "Select / focus"),
+		entry("Dbl-click", "Open / transfer"),
+		entry("Right-click", "Context menu"),
+		entry("Scroll", "Navigate list"),
+		entry("Drag", "Range select"),
 	}
 
 	// Pad columns to same height.
