@@ -24,6 +24,7 @@ import (
 	s3util "github.com/HopperShell/ferry/internal/s3"
 	ferrySSH "github.com/HopperShell/ferry/internal/ssh"
 	"github.com/HopperShell/ferry/internal/transfer"
+	"github.com/HopperShell/ferry/internal/ui/contextmenu"
 	"github.com/HopperShell/ferry/internal/ui/diff"
 	"github.com/HopperShell/ferry/internal/ui/modal"
 	"github.com/HopperShell/ferry/internal/ui/pane"
@@ -131,9 +132,10 @@ type Model struct {
 	// Editor
 	editSession *editor.EditSession
 
-	// Info panel and help overlay
+	// Info panel, help overlay, and context menu
 	infoPanel   *modal.InfoPanel
 	helpOverlay *modal.HelpOverlay
+	contextMenu contextmenu.Model
 
 	// Sync/diff view
 	diffView       diff.Model
@@ -192,6 +194,7 @@ func NewWithOptions(opts Options) Model {
 		passwordInput: pw,
 		infoPanel:   modal.NewInfoPanel(),
 		helpOverlay: modal.NewHelpOverlay(),
+		contextMenu: contextmenu.New(),
 		diffView:    diff.New(),
 	}
 
@@ -572,6 +575,13 @@ func (m Model) viewPassword() string {
 // --- State: Browser ---
 
 func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Context menu intercepts all input when visible.
+	if m.contextMenu.IsVisible() {
+		var cmd tea.Cmd
+		m.contextMenu, cmd = m.contextMenu.Update(msg)
+		return m, cmd
+	}
+
 	// Handle input modes first (rename, mkdir, confirm-delete).
 	if m.inputMode != "" {
 		return m.updateInputMode(msg)
@@ -780,6 +790,53 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.remotePane.Refresh()
 		}
 		return m, nil
+
+	case pane.ContextMenuMsg:
+		items := []contextmenu.Item{
+			{Label: "Copy      yy", Action: "copy"},
+			{Label: "Move       m", Action: "move"},
+			{Label: "Delete    dd", Action: "delete"},
+			{Label: "Rename     r", Action: "rename"},
+			{Label: "New Folder D", Action: "mkdir"},
+			{Label: "Edit       e", Action: "edit"},
+			{Label: "Sync       S", Action: "sync"},
+			{Label: "Info       i", Action: "info"},
+		}
+		m.contextMenu.Show(msg.X, msg.Y, items)
+		return m, nil
+
+	case contextmenu.SelectMsg:
+		switch msg.Action {
+		case "copy":
+			return m.doYank(false)
+		case "move":
+			return m.doYank(true)
+		case "delete":
+			return m.startDelete()
+		case "rename":
+			return m.startRename()
+		case "mkdir":
+			return m.startMkdir()
+		case "edit":
+			return m.startEdit()
+		case "sync":
+			return m.startSync()
+		case "info":
+			m.infoPanel.Toggle()
+			if m.infoPanel.IsVisible() {
+				if m.activePane == 0 {
+					m.infoPanel.SetEntry(m.localPane.CurrentEntry())
+				} else {
+					m.infoPanel.SetEntry(m.remotePane.CurrentEntry())
+				}
+			}
+			m.setPaneSizes()
+			return m, nil
+		}
+		return m, nil
+
+	case contextmenu.DismissMsg:
+		return m, nil
 	}
 
 	// Route key messages to active pane only; route all other messages
@@ -805,6 +862,13 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 // --- State: Sync ---
 
 func (m Model) updateSync(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Context menu intercepts all input when visible.
+	if m.contextMenu.IsVisible() {
+		var cmd tea.Cmd
+		m.contextMenu, cmd = m.contextMenu.Update(msg)
+		return m, cmd
+	}
+
 	if m.inputMode == "confirm-mirror" {
 		return m.updateInputMode(msg)
 	}
@@ -815,6 +879,59 @@ func (m Model) updateSync(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = stateBrowser
 			return m, tea.Batch(m.localPane.Refresh(), m.remotePane.Refresh())
 		}
+
+	case diff.ContextMenuMsg:
+		items := []contextmenu.Item{
+			{Label: "Push →       l", Action: "push"},
+			{Label: "Pull ←       h", Action: "pull"},
+			{Label: "Select All   a", Action: "select-all"},
+			{Label: "Deselect       ", Action: "deselect"},
+			{Label: "Mirror Push    ", Action: "mirror-push"},
+			{Label: "Mirror Pull    ", Action: "mirror-pull"},
+		}
+		m.contextMenu.Show(msg.X, msg.Y, items)
+		return m, nil
+
+	case contextmenu.SelectMsg:
+		switch msg.Action {
+		case "push":
+			sel := m.diffView.SelectedEntries()
+			if len(sel) > 0 {
+				return m, func() tea.Msg {
+					return diff.SyncAction{Entries: sel, Direction: "push"}
+				}
+			}
+		case "pull":
+			sel := m.diffView.SelectedEntries()
+			if len(sel) > 0 {
+				return m, func() tea.Msg {
+					return diff.SyncAction{Entries: sel, Direction: "pull"}
+				}
+			}
+		case "select-all":
+			entries := m.diffView.DiffEntries()
+			idx := 0
+			for _, e := range entries {
+				if e.Status != transfer.DiffSame {
+					m.diffView.Select(idx)
+					idx++
+				}
+			}
+		case "deselect":
+			m.diffView.ClearSelection()
+		case "mirror-push":
+			return m, func() tea.Msg {
+				return diff.MirrorAction{Direction: "push"}
+			}
+		case "mirror-pull":
+			return m, func() tea.Msg {
+				return diff.MirrorAction{Direction: "pull"}
+			}
+		}
+		return m, nil
+
+	case contextmenu.DismissMsg:
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -1542,6 +1659,9 @@ func (m Model) viewBrowser() string {
 	base := lipgloss.JoinVertical(lipgloss.Left, sections...)
 
 	// Render full-screen overlays on top.
+	if m.contextMenu.IsVisible() {
+		return m.contextMenu.View()
+	}
 	if m.helpOverlay.IsVisible() {
 		return m.helpOverlay.View()
 	}
@@ -1580,6 +1700,7 @@ func (m *Model) setPaneSizes() {
 	m.statusBar.SetWidth(m.width)
 	m.infoPanel.SetSize(m.width, infoPanelHeight)
 	m.helpOverlay.SetSize(m.width, m.height)
+	m.contextMenu.SetSize(m.width, m.height)
 }
 
 func (m *Model) updateStatusSelection() {
@@ -1867,6 +1988,10 @@ func (m Model) handleStatusBarClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.setPaneSizes()
+	}
+
+	if m.statusBar.HasError() {
+		m.statusBar.SetError("")
 	}
 
 	return m, nil
