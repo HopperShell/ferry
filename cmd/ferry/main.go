@@ -60,7 +60,7 @@ Flags:
 		opts.Host = host
 	}
 
-	p := tea.NewProgram(app.NewWithOptions(opts), tea.WithAltScreen())
+	p := tea.NewProgram(app.NewWithOptions(opts), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "ferry: %v\n", err)
 		os.Exit(1)

@@ -248,6 +248,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case tea.MouseMsg:
+		switch m.state {
+		case statePicker:
+			return m.updatePickerMouse(msg)
+		case stateBrowser:
+			return m.updateBrowserMouse(msg)
+		case stateSync:
+			return m.updateSyncMouse(msg)
+		}
+		return m, nil
+
 	case progressMsg:
 		evt := transfer.ProgressEvent(msg)
 		if evt.Done && evt.Err != nil {
@@ -1743,4 +1754,120 @@ func isConnectionError(err error) bool {
 		strings.Contains(msg, "use of closed network connection") ||
 		strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, io.EOF.Error())
+}
+
+// ---------------------------------------------------------------------------
+// Mouse handling
+// ---------------------------------------------------------------------------
+
+// mouseRegion determines which UI region a mouse event falls in during browser state.
+func (m Model) mouseRegion(x, y int) string {
+	paneWidth := m.width / 2
+	paneHeight := m.height - m.statusBar.Height() - m.infoPanel.Height()
+
+	switch {
+	case y < paneHeight && x < paneWidth:
+		return "left-pane"
+	case y < paneHeight && x >= paneWidth:
+		return "right-pane"
+	case m.infoPanel.IsVisible() && y >= paneHeight && y < paneHeight+m.infoPanel.Height():
+		return "info-panel"
+	case y >= m.height-m.statusBar.Height():
+		return "status-bar"
+	default:
+		return ""
+	}
+}
+
+func (m Model) updateBrowserMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Dismiss help overlay on any click.
+	if m.helpOverlay.IsVisible() {
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			m.helpOverlay.SetVisible(false)
+		}
+		return m, nil
+	}
+
+	// Skip mouse handling during input modes.
+	if m.inputMode != "" {
+		return m, nil
+	}
+
+	region := m.mouseRegion(msg.X, msg.Y)
+
+	switch region {
+	case "left-pane":
+		if m.activePane != 0 {
+			m.activePane = 0
+			m.localPane.SetActive(true)
+			m.remotePane.SetActive(false)
+			m.updateStatusSelection()
+		}
+		var cmd tea.Cmd
+		m.localPane, cmd = m.localPane.Update(msg)
+		m.updateStatusSelection()
+		return m, cmd
+
+	case "right-pane":
+		if m.activePane != 1 {
+			m.activePane = 1
+			m.localPane.SetActive(false)
+			m.remotePane.SetActive(true)
+			m.updateStatusSelection()
+		}
+		// Adjust X coordinate to be pane-local for right pane.
+		msg.X = msg.X - m.width/2
+		var cmd tea.Cmd
+		m.remotePane, cmd = m.remotePane.Update(msg)
+		m.updateStatusSelection()
+		return m, cmd
+
+	case "status-bar":
+		return m.handleStatusBarClick(msg)
+
+	case "info-panel":
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			m.infoPanel.SetVisible(false)
+			m.setPaneSizes()
+		}
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func (m Model) updatePickerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.picker, cmd = m.picker.Update(msg)
+	return m, cmd
+}
+
+func (m Model) updateSyncMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.diffView, cmd = m.diffView.Update(msg)
+	return m, cmd
+}
+
+func (m Model) handleStatusBarClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+
+	statusY := m.height - m.statusBar.Height()
+	localY := msg.Y - statusY
+
+	if localY == 0 {
+		// Clicked the connection/info line — toggle info panel.
+		m.infoPanel.Toggle()
+		if m.infoPanel.IsVisible() {
+			if m.activePane == 0 {
+				m.infoPanel.SetEntry(m.localPane.CurrentEntry())
+			} else {
+				m.infoPanel.SetEntry(m.remotePane.CurrentEntry())
+			}
+		}
+		m.setPaneSizes()
+	}
+
+	return m, nil
 }
