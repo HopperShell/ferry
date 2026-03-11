@@ -4,6 +4,7 @@ package diff
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -68,6 +69,8 @@ type Model struct {
 	syncTotal     int    // total items to transfer
 	mirrorPending bool   // true after pressing M, waiting for direction
 	confirmMsg    string // shown in footer when awaiting y/n confirmation
+	lastClickTime time.Time
+	lastClickRow  int
 }
 
 // New creates a new empty diff view model.
@@ -191,6 +194,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		return m.updateMouse(msg)
+
 	case tea.KeyMsg:
 		// Handle mirror-pending state: waiting for direction after M.
 		if m.mirrorPending {
@@ -293,6 +299,78 @@ func (m *Model) ensureVisible() {
 	if m.cursor >= m.offset+viewHeight {
 		m.offset = m.cursor - viewHeight + 1
 	}
+}
+
+// ContextMenuMsg is emitted on right-click to request a context menu.
+type ContextMenuMsg struct {
+	X, Y int
+}
+
+func (m Model) updateMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
+	visible := m.diffEntries()
+
+	switch msg.Action {
+	case tea.MouseActionPress:
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			if m.cursor > 0 {
+				m.cursor--
+				m.ensureVisible()
+			}
+		case tea.MouseButtonWheelDown:
+			if m.cursor < len(visible)-1 {
+				m.cursor++
+				m.ensureVisible()
+			}
+		case tea.MouseButtonLeft:
+			// View layout: border(1) + title(1) + header(1) = 3 rows before entries.
+			entryStartY := 3
+			row := msg.Y - entryStartY + m.offset
+			if row < 0 || row >= len(visible) {
+				return m, nil
+			}
+
+			now := time.Now()
+			isDouble := row == m.lastClickRow && now.Sub(m.lastClickTime) < 400*time.Millisecond
+			m.lastClickTime = now
+			m.lastClickRow = row
+
+			if isDouble {
+				// Double-click: toggle selection.
+				if m.selected[row] {
+					delete(m.selected, row)
+				} else {
+					m.selected[row] = true
+				}
+			} else {
+				m.cursor = row
+				m.ensureVisible()
+			}
+
+		case tea.MouseButtonRight:
+			entryStartY := 3
+			row := msg.Y - entryStartY + m.offset
+			if row >= 0 && row < len(visible) {
+				m.cursor = row
+				m.ensureVisible()
+				return m, func() tea.Msg {
+					return ContextMenuMsg{X: msg.X, Y: msg.Y}
+				}
+			}
+		}
+	}
+
+	return m, nil
+}
+
+// Select marks the given index as selected.
+func (m *Model) Select(idx int) {
+	m.selected[idx] = true
+}
+
+// ClearSelection removes all selections.
+func (m *Model) ClearSelection() {
+	m.selected = make(map[int]bool)
 }
 
 // viewportHeight returns how many entry rows fit on screen.

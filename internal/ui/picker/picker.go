@@ -4,6 +4,7 @@ package picker
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -41,6 +42,8 @@ type Model struct {
 	width           int
 	height          int
 	errMsg          string
+	lastClickTime   time.Time
+	lastClickItem   int
 }
 
 // SetError sets an error message to display in the picker.
@@ -97,6 +100,33 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		case "esc":
 			return m, tea.Quit
+		}
+
+	case tea.MouseMsg:
+		switch {
+		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelUp:
+			if m.cursor > 0 {
+				m.cursor--
+			}
+			return m, nil
+		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelDown:
+			if m.cursor < m.totalItems()-1 {
+				m.cursor++
+			}
+			return m, nil
+		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
+			item := m.mouseToItem(msg.Y)
+			if item >= 0 && item < m.totalItems() {
+				now := time.Now()
+				if item == m.lastClickItem && now.Sub(m.lastClickTime) < 400*time.Millisecond {
+					m.cursor = item
+					return m, m.handleEnter()
+				}
+				m.cursor = item
+				m.lastClickTime = now
+				m.lastClickItem = item
+			}
+			return m, nil
 		}
 	}
 
@@ -287,6 +317,66 @@ func (m Model) View() string {
 	b.WriteString(footer)
 
 	return b.String()
+}
+
+func (m Model) mouseToItem(y int) int {
+	// Header: logo lines (~3) + blank(1) + search(1) + blank(1) = 6 rows before list.
+	listStartY := 6
+	if y < listStartY {
+		return -1
+	}
+
+	maxVisible := m.height - 14
+	if maxVisible < 3 {
+		maxVisible = 3
+	}
+
+	// Reconstruct display lines (same logic as View).
+	type displayLine struct {
+		selectable bool
+		index      int
+	}
+	var lines []displayLine
+	for i := range m.filtered {
+		lines = append(lines, displayLine{selectable: true, index: i})
+	}
+	if len(m.filteredBuckets) > 0 {
+		lastProfile := ""
+		for i, b := range m.filteredBuckets {
+			profile := b.Profile
+			if profile == "" {
+				profile = "default"
+			}
+			if profile != lastProfile {
+				lines = append(lines, displayLine{selectable: false, index: -1})
+				lastProfile = profile
+			}
+			lines = append(lines, displayLine{selectable: true, index: len(m.filtered) + i})
+		}
+	}
+
+	// Find scroll start (mirrors View logic).
+	cursorDisplayIdx := 0
+	for i, l := range lines {
+		if l.selectable && l.index == m.cursor {
+			cursorDisplayIdx = i
+			break
+		}
+	}
+	start := 0
+	if cursorDisplayIdx >= maxVisible {
+		start = cursorDisplayIdx - maxVisible + 1
+	}
+
+	clickedDisplayIdx := start + (y - listStartY)
+	if clickedDisplayIdx < 0 || clickedDisplayIdx >= len(lines) {
+		return -1
+	}
+	l := lines[clickedDisplayIdx]
+	if !l.selectable {
+		return -1
+	}
+	return l.index
 }
 
 func selectTarget(target ConnectionTarget) tea.Cmd {
