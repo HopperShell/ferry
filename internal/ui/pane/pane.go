@@ -592,6 +592,10 @@ func (m Model) mouseToRow(y int) int {
 	// Pane layout: border(1) + header(1) + file rows + footer(1) + border(1)
 	// File list starts at y=2 (border top + header), each row is 1 line.
 	listStart := 2
+	listEnd := listStart + m.listHeight()
+	if y < listStart || y >= listEnd {
+		return -1
+	}
 	row := y - listStart + m.offset
 	if row < 0 || row >= m.visibleCount() {
 		return -1

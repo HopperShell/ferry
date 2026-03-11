@@ -437,7 +437,11 @@ func (m Model) View() string {
 	case stateBrowser:
 		return m.viewBrowser()
 	case stateSync:
-		return m.diffView.View()
+		base := m.diffView.View()
+		if m.contextMenu.IsVisible() {
+			return m.contextMenu.Overlay(base)
+		}
+		return base
 	}
 	return ""
 }
@@ -1660,7 +1664,7 @@ func (m Model) viewBrowser() string {
 
 	// Render full-screen overlays on top.
 	if m.contextMenu.IsVisible() {
-		return m.contextMenu.View()
+		return m.contextMenu.Overlay(base)
 	}
 	if m.helpOverlay.IsVisible() {
 		return m.helpOverlay.View()
@@ -1901,6 +1905,13 @@ func (m Model) mouseRegion(x, y int) string {
 }
 
 func (m Model) updateBrowserMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Context menu intercepts all mouse input when visible.
+	if m.contextMenu.IsVisible() {
+		var cmd tea.Cmd
+		m.contextMenu, cmd = m.contextMenu.Update(msg)
+		return m, cmd
+	}
+
 	// Dismiss help overlay on any click.
 	if m.helpOverlay.IsVisible() {
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
@@ -1964,6 +1975,11 @@ func (m Model) updatePickerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateSyncMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.contextMenu.IsVisible() {
+		var cmd tea.Cmd
+		m.contextMenu, cmd = m.contextMenu.Update(msg)
+		return m, cmd
+	}
 	var cmd tea.Cmd
 	m.diffView, cmd = m.diffView.Update(msg)
 	return m, cmd

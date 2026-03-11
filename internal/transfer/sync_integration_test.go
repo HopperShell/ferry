@@ -3,6 +3,7 @@ package transfer_test
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -145,7 +146,7 @@ func TestConcurrentSyncOverSFTP(t *testing.T) {
 	}
 }
 
-// copyFile mirrors the copyFile function from app.go — read into buffer, write via temp, rename.
+// copyFile mirrors the copyFile function from app.go — streaming via io.Pipe.
 func copyFile(srcFS fs.FileSystem, srcPath string, dstFS fs.FileSystem, dstPath string) error {
 	srcStat, err := srcFS.Stat(srcPath)
 	var perm os.FileMode = 0o644
@@ -153,15 +154,23 @@ func copyFile(srcFS fs.FileSystem, srcPath string, dstFS fs.FileSystem, dstPath 
 		perm = srcStat.Mode
 	}
 
-	var buf bytes.Buffer
-	if err := srcFS.Read(srcPath, &buf); err != nil {
-		return fmt.Errorf("read: %w", err)
-	}
+	pr, pw := io.Pipe()
+
+	errCh := make(chan error, 1)
+	go func() {
+		err := srcFS.Read(srcPath, pw)
+		pw.CloseWithError(err)
+		errCh <- err
+	}()
 
 	tmpPath := dstPath + ".ferry-tmp"
-	if err := dstFS.Write(tmpPath, &buf, perm); err != nil {
+	if err := dstFS.Write(tmpPath, pr, perm); err != nil {
 		_ = dstFS.Remove(tmpPath)
 		return fmt.Errorf("write: %w", err)
+	}
+	if err := <-errCh; err != nil {
+		_ = dstFS.Remove(tmpPath)
+		return fmt.Errorf("read: %w", err)
 	}
 	if err := dstFS.Rename(tmpPath, dstPath); err != nil {
 		_ = dstFS.Remove(tmpPath)
