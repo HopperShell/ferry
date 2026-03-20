@@ -24,6 +24,7 @@ import (
 	s3util "github.com/HopperShell/ferry/internal/s3"
 	ferrySSH "github.com/HopperShell/ferry/internal/ssh"
 	"github.com/HopperShell/ferry/internal/transfer"
+	transferUI "github.com/HopperShell/ferry/internal/ui/transfer"
 	"github.com/HopperShell/ferry/internal/ui/contextmenu"
 	"github.com/HopperShell/ferry/internal/ui/diff"
 	"github.com/HopperShell/ferry/internal/ui/modal"
@@ -132,10 +133,11 @@ type Model struct {
 	// Editor
 	editSession *editor.EditSession
 
-	// Info panel, help overlay, and context menu
-	infoPanel   *modal.InfoPanel
-	helpOverlay *modal.HelpOverlay
-	contextMenu contextmenu.Model
+	// Info panel, help overlay, context menu, and transfer overlay
+	infoPanel       *modal.InfoPanel
+	helpOverlay     *modal.HelpOverlay
+	contextMenu     contextmenu.Model
+	transferOverlay *transferUI.Overlay
 
 	// Sync/diff view
 	diffView       diff.Model
@@ -192,9 +194,10 @@ func NewWithOptions(opts Options) Model {
 		spinner:       sp,
 		inputField:    ti,
 		passwordInput: pw,
-		infoPanel:   modal.NewInfoPanel(),
-		helpOverlay: modal.NewHelpOverlay(),
-		contextMenu: contextmenu.New(),
+		infoPanel:       modal.NewInfoPanel(),
+		helpOverlay:     modal.NewHelpOverlay(),
+		contextMenu:     contextmenu.New(),
+		transferOverlay: transferUI.NewOverlay(),
 		diffView:    diff.New(),
 	}
 
@@ -264,14 +267,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case progressMsg:
 		evt := transfer.ProgressEvent(msg)
+		// Feed progress to the transfer overlay.
+		m.transferOverlay.UpdateProgress(evt)
+		if m.engine != nil {
+			m.transferOverlay.SetJobs(m.engine.Jobs())
+		}
 		if evt.Done && evt.Err != nil {
 			if isConnectionError(evt.Err) {
 				m.statusBar.SetError("Connection lost. Press R to reconnect.")
 			} else {
 				m.statusBar.SetError(fmt.Sprintf("Transfer failed: %s: %v", evt.Name, evt.Err))
 			}
-		} else if evt.Done {
-			m.statusBar.SetError(fmt.Sprintf("Transferred: %s", evt.Name))
 		}
 		// If this was a move (cut) and all done, delete sources.
 		if m.engine != nil && m.engine.IsFinished() && m.clip != nil && m.clip.cut {
@@ -332,6 +338,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case transferReadyMsg:
 		m.engine = msg.engine
+		m.transferOverlay.SetVisible(true)
 		m.statusBar.SetError("Transferring files...")
 		return m, listenForProgress(m.engine.Progress())
 
@@ -340,6 +347,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		jobCount := 0
 		if m.engine != nil {
 			jobCount = len(m.engine.Jobs())
+			m.transferOverlay.SetJobs(m.engine.Jobs())
 			m.engine = nil
 		}
 		if jobCount > 0 {
@@ -438,6 +446,9 @@ func (m Model) View() string {
 		return m.viewBrowser()
 	case stateSync:
 		base := m.diffView.View()
+		if m.transferOverlay.IsVisible() {
+			return m.transferOverlay.View()
+		}
 		if m.contextMenu.IsVisible() {
 			return m.contextMenu.Overlay(base)
 		}
@@ -593,6 +604,10 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Handle Esc: close the highest-priority visible overlay.
 	if msg, ok := msg.(tea.KeyMsg); ok && msg.String() == "esc" {
+		if m.transferOverlay.IsVisible() {
+			m.transferOverlay.SetVisible(false)
+			return m, nil
+		}
 		if m.helpOverlay.IsVisible() {
 			m.helpOverlay.SetVisible(false)
 			return m, nil
@@ -603,8 +618,8 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Block pane navigation when help overlay is visible.
-	if m.helpOverlay.IsVisible() {
+	// Block pane navigation when transfer or help overlay is visible.
+	if m.transferOverlay.IsVisible() || m.helpOverlay.IsVisible() {
 		if _, ok := msg.(tea.KeyMsg); ok {
 			return m, nil
 		}
@@ -740,6 +755,7 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 			engine.Done()
 		}()
 		m.engine = engine
+		m.transferOverlay.SetVisible(true)
 		m.statusBar.SetError(fmt.Sprintf("Transferring %d item(s)...", len(entries)))
 		return m, listenForProgress(engine.Progress())
 
@@ -1531,6 +1547,7 @@ func (m Model) executePaste(dstFS fs.FileSystem, dstPath string) (tea.Model, tea
 		m.engine.Done()
 	}()
 
+	m.transferOverlay.SetVisible(true)
 	m.statusBar.SetError(fmt.Sprintf("Transferring %d item(s)...", len(clipEntries)))
 
 	return m, listenForProgress(m.engine.Progress())
@@ -1663,6 +1680,9 @@ func (m Model) viewBrowser() string {
 	base := lipgloss.JoinVertical(lipgloss.Left, sections...)
 
 	// Render full-screen overlays on top.
+	if m.transferOverlay.IsVisible() {
+		return m.transferOverlay.View()
+	}
 	if m.contextMenu.IsVisible() {
 		return m.contextMenu.Overlay(base)
 	}
@@ -1704,6 +1724,7 @@ func (m *Model) setPaneSizes() {
 	m.statusBar.SetWidth(m.width)
 	m.infoPanel.SetSize(m.width, infoPanelHeight)
 	m.helpOverlay.SetSize(m.width, m.height)
+	m.transferOverlay.SetSize(m.width, m.height)
 	m.contextMenu.SetSize(m.width, m.height)
 }
 
@@ -1910,6 +1931,14 @@ func (m Model) updateBrowserMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.contextMenu, cmd = m.contextMenu.Update(msg)
 		return m, cmd
+	}
+
+	// Dismiss transfer overlay on any click.
+	if m.transferOverlay.IsVisible() {
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			m.transferOverlay.SetVisible(false)
+		}
+		return m, nil
 	}
 
 	// Dismiss help overlay on any click.
