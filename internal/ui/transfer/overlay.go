@@ -162,7 +162,11 @@ func (o *Overlay) View() string {
 	if etaStr != "" {
 		footer += "  |  " + etaStr
 	}
-	footer += "  |  Esc: close"
+	if completedCount < len(o.jobs) {
+		footer += "  |  Esc: cancel"
+	} else {
+		footer += "  |  Esc: close"
+	}
 
 	// Build box content.
 	content := strings.Join(lines, "\n")
