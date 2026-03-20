@@ -53,7 +53,8 @@ Flags:
 		host = flag.Arg(0)
 	}
 
-	opts := app.Options{}
+	cwd, _ := os.Getwd()
+	opts := app.Options{LocalDir: cwd}
 	if strings.HasPrefix(host, "s3://") {
 		opts.S3URI = host
 	} else {

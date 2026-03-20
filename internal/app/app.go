@@ -147,6 +147,9 @@ type Model struct {
 	mirrorAction   diff.MirrorAction         // pending mirror direction
 	mirrorEntries  []transfer.DiffEntry      // all entries for mirror confirmation
 
+	// Initial local directory (from cwd)
+	localDir string
+
 	// S3 backend (nil when using SSH)
 	s3Client    *s3svc.Client
 	s3Bucket    string
@@ -160,8 +163,9 @@ type Model struct {
 
 // Options configures how the app starts.
 type Options struct {
-	Host  string // If set, skip picker and connect to SSH host
-	S3URI string // If set, skip picker and connect to S3 (e.g., "s3://bucket/prefix")
+	Host     string // If set, skip picker and connect to SSH host
+	S3URI    string // If set, skip picker and connect to S3 (e.g., "s3://bucket/prefix")
+	LocalDir string // If set, local pane starts in this directory instead of $HOME
 }
 
 // New creates the initial app model with the connection picker.
@@ -189,16 +193,17 @@ func NewWithOptions(opts Options) Model {
 	pw.Placeholder = "password"
 
 	m := Model{
-		state:         statePicker,
-		picker:        picker.NewWithBuckets(hosts, buckets),
-		spinner:       sp,
-		inputField:    ti,
-		passwordInput: pw,
+		state:           statePicker,
+		picker:          picker.NewWithBuckets(hosts, buckets),
+		spinner:         sp,
+		inputField:      ti,
+		passwordInput:   pw,
 		infoPanel:       modal.NewInfoPanel(),
 		helpOverlay:     modal.NewHelpOverlay(),
 		contextMenu:     contextmenu.New(),
 		transferOverlay: transferUI.NewOverlay(),
-		diffView:    diff.New(),
+		diffView:        diff.New(),
+		localDir:        opts.LocalDir,
 	}
 
 	if opts.S3URI != "" {
@@ -397,6 +402,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		remoteFS := fs.NewS3FS(msg.client, msg.bucket, msg.prefix)
 
 		m.localPane = pane.New(localFS, "Local")
+		if m.localDir != "" {
+			m.localPane.SetStartPath(m.localDir)
+		}
 		m.remotePane = pane.New(remoteFS, "S3")
 		m.activePane = 0
 		m.localPane.SetActive(true)
@@ -503,6 +511,9 @@ func (m Model) updateConnecting(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.localPane = pane.New(localFS, "Local")
+		if m.localDir != "" {
+			m.localPane.SetStartPath(m.localDir)
+		}
 		m.remotePane = pane.New(remoteFS, "Remote")
 		m.activePane = 0
 		m.localPane.SetActive(true)
@@ -605,6 +616,10 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle Esc: close the highest-priority visible overlay.
 	if msg, ok := msg.(tea.KeyMsg); ok && msg.String() == "esc" {
 		if m.transferOverlay.IsVisible() {
+			if m.engine != nil {
+				m.engine.Cancel()
+				m.statusBar.SetError("Transfer cancelled")
+			}
 			m.transferOverlay.SetVisible(false)
 			return m, nil
 		}

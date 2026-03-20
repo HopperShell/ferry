@@ -103,6 +103,7 @@ type Model struct {
 	findCh       <-chan fs.WalkResult   // channel for receiving walk results
 
 	pendingHighlight string // filename to highlight after next entriesMsg
+	startPath        string // initial directory (overrides HomeDir in Init)
 }
 
 // New creates a new pane backed by the given filesystem.
@@ -196,17 +197,27 @@ func (m *Model) NavigateTo(path string) tea.Cmd {
 // Init loads the initial directory (home or root).
 func (m Model) Init() tea.Cmd {
 	label := m.label
+	startPath := m.startPath
 	return func() tea.Msg {
-		home, err := m.fs.HomeDir()
-		if err != nil {
-			home = "/"
+		dir := startPath
+		if dir == "" {
+			var err error
+			dir, err = m.fs.HomeDir()
+			if err != nil {
+				dir = "/"
+			}
 		}
-		entries, err := m.fs.List(home)
+		entries, err := m.fs.List(dir)
 		if err != nil {
 			return errMsg{label: label, err: err}
 		}
-		return entriesMsg{label: label, path: home, entries: entries}
+		return entriesMsg{label: label, path: dir, entries: entries}
 	}
+}
+
+// SetStartPath sets the initial directory to open instead of HomeDir.
+func (m *Model) SetStartPath(path string) {
+	m.startPath = path
 }
 
 // Update handles key messages. It is called by the parent.
