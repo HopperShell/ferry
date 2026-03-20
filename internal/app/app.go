@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -64,6 +65,12 @@ type progressMsg transfer.ProgressEvent
 
 // transferDoneMsg signals that all transfers have completed.
 type transferDoneMsg struct{}
+
+// gitDiffDoneMsg signals that a git diff was generated and transferred.
+type gitDiffDoneMsg struct {
+	filename string
+	err      error
+}
 
 // clearErrorMsg is sent after a timeout to auto-dismiss the status bar error.
 type clearErrorMsg struct{}
@@ -346,6 +353,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.transferOverlay.SetVisible(true)
 		m.statusBar.SetError("Transferring files...")
 		return m, listenForProgress(m.engine.Progress())
+
+	case gitDiffDoneMsg:
+		if msg.err != nil {
+			m.statusBar.SetError(fmt.Sprintf("Git diff failed: %v", msg.err))
+		} else {
+			m.statusBar.SetError(fmt.Sprintf("Sent %s", msg.filename))
+		}
+		return m, tea.Batch(m.remotePane.Refresh(), clearErrorAfter(5*time.Second))
 
 	case transferDoneMsg:
 		// Engine finished (channel closed). Clean up and refresh panes.
@@ -738,6 +753,10 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusBar.SetError("Reconnecting...")
 				return m, m.reconnect()
 			}
+
+		case "ctrl+g":
+			m.lastKey = ""
+			return m.sendGitDiff()
 
 		default:
 			m.lastKey = ""
@@ -1638,6 +1657,45 @@ func (m Model) startRename() (tea.Model, tea.Cmd) {
 	m.inputField.CursorEnd()
 
 	return m, textinput.Blink
+}
+
+// sendGitDiff generates a git diff of the current branch against main
+// from the local pane's directory and writes it to the remote pane.
+func (m Model) sendGitDiff() (tea.Model, tea.Cmd) {
+	localPath := m.localPane.Path()
+	dstFS := m.remotePane.FS()
+	dstPath := m.remotePane.Path()
+
+	m.statusBar.SetError("Generating git diff...")
+	return m, func() tea.Msg {
+		// Get current branch name.
+		branchCmd := exec.Command("git", "-C", localPath, "rev-parse", "--abbrev-ref", "HEAD")
+		branchOut, err := branchCmd.Output()
+		if err != nil {
+			return gitDiffDoneMsg{err: fmt.Errorf("not a git repo or no commits")}
+		}
+		branch := strings.TrimSpace(string(branchOut))
+
+		// Generate diff against main.
+		diffCmd := exec.Command("git", "-C", localPath, "diff", "main...HEAD")
+		diffOut, err := diffCmd.Output()
+		if err != nil {
+			return gitDiffDoneMsg{err: fmt.Errorf("git diff failed: %w", err)}
+		}
+		if len(diffOut) == 0 {
+			return gitDiffDoneMsg{err: fmt.Errorf("no diff between %s and main", branch)}
+		}
+
+		// Write diff to remote pane.
+		filename := branch + ".diff"
+		remotePath := filepath.Join(dstPath, filename)
+		r := strings.NewReader(string(diffOut))
+		if err := dstFS.Write(remotePath, r, 0o644); err != nil {
+			return gitDiffDoneMsg{err: fmt.Errorf("write failed: %w", err)}
+		}
+
+		return gitDiffDoneMsg{filename: filename}
+	}
 }
 
 // startEdit opens the current file in the user's editor.
