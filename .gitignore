@@ -7,3 +7,6 @@ test/docker/testkey.pub
 
 # Remotion video source
 video/
+
+# Docs
+docs/
