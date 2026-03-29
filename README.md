@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <video src="assets/ferry-demo.mp4" width="800" autoplay loop muted playsinline></video>
+  <video src="https://github.com/HopperShell/ferry/raw/main/assets/ferry-demo.mp4" width="800" autoplay loop muted playsinline></video>
 </p>
 
 <!-- <p align="center">
