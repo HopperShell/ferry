@@ -6,6 +6,10 @@
   <strong>Secure file transfer, terminal style.</strong>
 </p>
 
+<p align="center">
+  <video src="assets/ferry-demo.mp4" width="800" autoplay loop muted playsinline></video>
+</p>
+
 <!-- <p align="center">
   <a href="https://goreportcard.com/report/github.com/HopperShell/ferry"><img src="https://goreportcard.com/badge/github.com/HopperShell/ferry" alt="Go Report Card"></a>
   <a href="https://github.com/HopperShell/ferry/releases"><img src="https://img.shields.io/github/v/release/HopperShell/ferry" alt="Release"></a>
