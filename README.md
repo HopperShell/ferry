@@ -6,14 +6,6 @@
   <strong>Secure file transfer, terminal style.</strong>
 </p>
 
-<!-- DEMO VIDEO: drag-drop ferry-demo.mp4 here via GitHub web editor to get a user-attachments URL -->
-
-<!-- <p align="center">
-  <a href="https://goreportcard.com/report/github.com/HopperShell/ferry"><img src="https://goreportcard.com/badge/github.com/HopperShell/ferry" alt="Go Report Card"></a>
-  <a href="https://github.com/HopperShell/ferry/releases"><img src="https://img.shields.io/github/v/release/HopperShell/ferry" alt="Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
-</p> -->
-
 ---
 
 Ferry is a terminal-based file transfer tool built for engineers who live in the terminal. Dual-pane file browser (local + remote) over SSH or S3, with vim-style keybindings, visual directory sync, and remote file editing — all without leaving the command line.
