@@ -6,15 +6,13 @@
   <strong>Secure file transfer, terminal style.</strong>
 </p>
 
+https://github.com/user-attachments/assets/f85097dd-41e3-4b6f-95dd-601f9a0cdc1b
+
 <!-- <p align="center">
   <a href="https://goreportcard.com/report/github.com/HopperShell/ferry"><img src="https://goreportcard.com/badge/github.com/HopperShell/ferry" alt="Go Report Card"></a>
   <a href="https://github.com/HopperShell/ferry/releases"><img src="https://img.shields.io/github/v/release/HopperShell/ferry" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
-</p> 
-
-https://github.com/user-attachments/assets/f85097dd-41e3-4b6f-95dd-601f9a0cdc1b
-
--->
+</p> -->
 
 ---
 
