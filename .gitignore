@@ -4,3 +4,6 @@
 # Test SSH keys
 test/docker/testkey
 test/docker/testkey.pub
+
+# Remotion video source
+video/
