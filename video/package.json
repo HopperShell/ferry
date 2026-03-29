@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "preview": "remotion studio",
-    "render": "remotion render src/Root.tsx Demo out/ferry-demo.mp4 --codec=h264"
+    "render": "remotion render src/index.ts Demo out/ferry-demo.mp4 --codec=h264"
   },
   "dependencies": {
     "@remotion/cli": "4.0.261",
